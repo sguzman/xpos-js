@@ -17,6 +17,8 @@ let socket = null;
 let reconnectTimer = null;
 let connectionSeq = 0;
 let outboundSeq = 0;
+let eventsRegistered = false;
+let bootstrapInFlight = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -194,7 +196,7 @@ async function snapshotTab(args = {}) {
 
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
-    world: "MAIN",
+    world: "ISOLATED",
     func: collectorMain,
     args: [{ includeHtml, includeText, includeSelection }]
   });
@@ -421,6 +423,11 @@ async function connectSocket() {
 }
 
 function registerEventBridge() {
+  if (eventsRegistered) {
+    log("warn", "events.register.skip_already_registered", {});
+    return;
+  }
+
   chrome.tabs.onCreated.addListener((tab) => sendEvent("tab.created", mapTab(tab)));
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) =>
     sendEvent("tab.updated", { tabId, changeInfo, tab: mapTab(tab) })
@@ -437,15 +444,31 @@ function registerEventBridge() {
   chrome.windows.onCreated.addListener((window) => sendEvent("window.created", mapWindow(window)));
   chrome.windows.onRemoved.addListener((windowId) => sendEvent("window.removed", { windowId }));
   chrome.windows.onFocusChanged.addListener((windowId) => sendEvent("window.focus_changed", { windowId }));
+
+  eventsRegistered = true;
+  log("info", "events.register.ok", {});
 }
 
-async function bootstrap() {
+async function bootstrap(reason = "default") {
+  if (bootstrapInFlight) {
+    log("info", "bootstrap.skip_inflight", { reason });
+    return bootstrapInFlight;
+  }
+
   const traceId = nextTraceId("boot");
-  log("info", "bootstrap.start", { version: EXT_VERSION }, traceId);
-  await loadConfig();
-  registerEventBridge();
-  await connectSocket();
-  log("info", "bootstrap.ready", {}, traceId);
+  bootstrapInFlight = (async () => {
+    log("info", "bootstrap.start", { version: EXT_VERSION, reason }, traceId);
+    await loadConfig();
+    registerEventBridge();
+    await connectSocket();
+    log("info", "bootstrap.ready", { reason }, traceId);
+  })();
+
+  try {
+    await bootstrapInFlight;
+  } finally {
+    bootstrapInFlight = null;
+  }
 }
 
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -458,7 +481,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 chrome.runtime.onStartup.addListener(() => {
   const traceId = nextTraceId("lifecycle");
   log("info", "runtime.startup", {}, traceId);
-  void bootstrap();
+  void bootstrap("runtime.onStartup");
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -499,4 +522,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
-void bootstrap();
+void bootstrap("module.load");
