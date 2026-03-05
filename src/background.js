@@ -13,8 +13,7 @@ const DEFAULT_CONFIG = Object.freeze({
 const STORAGE_KEY = "xposeConfig";
 const CONNECTION_ALARM_NAME = "xpose-connection-heartbeat";
 const CONNECTION_ALARM_MINUTES = 1;
-const SOCKET_KEEPALIVE_MS = 15000;
-const SNAPSHOT_EXECUTE_TIMEOUT_MS = 15000;
+const SNAPSHOT_EXECUTE_TIMEOUT_MS = 7000;
 
 let runtimeConfig = { ...DEFAULT_CONFIG };
 let socket = null;
@@ -23,7 +22,6 @@ let connectionSeq = 0;
 let outboundSeq = 0;
 let eventsRegistered = false;
 let bootstrapInFlight = null;
-let keepaliveTimer = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -197,10 +195,19 @@ function collectorMain(args) {
   const includeHtml = Boolean(args?.includeHtml);
   const includeText = Boolean(args?.includeText);
   const includeSelection = Boolean(args?.includeSelection);
+  const maxTextChars = Number(args?.maxTextChars || 0);
+  const maxSelectionChars = Number(args?.maxSelectionChars || 0);
 
   const html = includeHtml ? document.documentElement.outerHTML : "";
-  const text = includeText ? (document.body ? document.body.textContent || "" : "") : "";
-  const selection = includeSelection ? String(window.getSelection?.() || "") : "";
+  let text = includeText ? (document.body ? document.body.innerText : "") : "";
+  let selection = includeSelection ? String(window.getSelection?.() || "") : "";
+
+  if (includeText && maxTextChars > 0 && text.length > maxTextChars) {
+    text = text.slice(0, maxTextChars);
+  }
+  if (includeSelection && maxSelectionChars > 0 && selection.length > maxSelectionChars) {
+    selection = selection.slice(0, maxSelectionChars);
+  }
 
   return {
     startedAt,
@@ -224,13 +231,14 @@ async function snapshotTab(args = {}) {
   const includeHtml = pickArg(args, "includeHtml", "include_html") ?? runtimeConfig.includeHtml;
   const includeText = pickArg(args, "includeText", "include_text") ?? runtimeConfig.includeText;
   const includeSelection = pickArg(args, "includeSelection", "include_selection") ?? runtimeConfig.includeSelection;
+  const maxTextChars = Math.max(1000, Math.floor(runtimeConfig.maxTextBytes / 2));
 
   const [result] = await withTimeout(
     chrome.scripting.executeScript({
       target: { tabId },
       world: "ISOLATED",
       func: collectorMain,
-      args: [{ includeHtml, includeText, includeSelection }]
+      args: [{ includeHtml, includeText, includeSelection, maxTextChars, maxSelectionChars: maxTextChars }]
     }),
     SNAPSHOT_EXECUTE_TIMEOUT_MS,
     "snapshot executeScript"
@@ -274,32 +282,6 @@ function safeSend(data) {
 
   socket.send(JSON.stringify(data));
   return true;
-}
-
-function startKeepalive() {
-  if (keepaliveTimer) {
-    clearInterval(keepaliveTimer);
-  }
-
-  keepaliveTimer = setInterval(() => {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return;
-    }
-
-    safeSend({
-      type: "keepalive",
-      ts: nowIso(),
-      seq: ++outboundSeq
-    });
-  }, SOCKET_KEEPALIVE_MS);
-}
-
-function stopKeepalive() {
-  if (!keepaliveTimer) {
-    return;
-  }
-  clearInterval(keepaliveTimer);
-  keepaliveTimer = null;
 }
 
 function sendEvent(name, payload) {
@@ -448,7 +430,6 @@ async function connectSocket() {
 
   socket.onopen = async () => {
     log("info", "socket.open", { endpoint }, traceId);
-    startKeepalive();
     const [windows, tabs] = await Promise.all([listWindows(), listTabs()]);
     safeSend({
       type: "hello",
@@ -487,7 +468,6 @@ async function connectSocket() {
       { code: event.code, reason: event.reason, wasClean: event.wasClean, reconnectMs: runtimeConfig.reconnectMs },
       traceId
     );
-    stopKeepalive();
     socket = null;
     scheduleReconnect();
   };
