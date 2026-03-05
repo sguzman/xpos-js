@@ -14,6 +14,7 @@ const STORAGE_KEY = "xposeConfig";
 const CONNECTION_ALARM_NAME = "xpose-connection-heartbeat";
 const CONNECTION_ALARM_MINUTES = 1;
 const SOCKET_KEEPALIVE_MS = 15000;
+const SNAPSHOT_EXECUTE_TIMEOUT_MS = 15000;
 
 let runtimeConfig = { ...DEFAULT_CONFIG };
 let socket = null;
@@ -119,6 +120,31 @@ function trimByBytes(input, maxBytes) {
   };
 }
 
+function pickArg(args, camelKey, snakeKey) {
+  if (Object.hasOwn(args, camelKey)) {
+    return args[camelKey];
+  }
+  if (Object.hasOwn(args, snakeKey)) {
+    return args[snakeKey];
+  }
+  return undefined;
+}
+
+async function withTimeout(promise, ms, label) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function mapWindow(win) {
   return {
     id: win.id,
@@ -158,8 +184,9 @@ async function listWindows() {
 
 async function listTabs(args = {}) {
   const queryInfo = {};
-  if (Number.isInteger(args.windowId)) {
-    queryInfo.windowId = args.windowId;
+  const windowId = Number(pickArg(args, "windowId", "window_id"));
+  if (Number.isInteger(windowId)) {
+    queryInfo.windowId = windowId;
   }
   const tabs = await chrome.tabs.query(queryInfo);
   return tabs.map(mapTab);
@@ -172,7 +199,7 @@ function collectorMain(args) {
   const includeSelection = Boolean(args?.includeSelection);
 
   const html = includeHtml ? document.documentElement.outerHTML : "";
-  const text = includeText ? (document.body ? document.body.innerText : "") : "";
+  const text = includeText ? (document.body ? document.body.textContent || "" : "") : "";
   const selection = includeSelection ? String(window.getSelection?.() || "") : "";
 
   return {
@@ -189,21 +216,25 @@ function collectorMain(args) {
 }
 
 async function snapshotTab(args = {}) {
-  const tabId = Number(args.tabId);
+  const tabId = Number(pickArg(args, "tabId", "tab_id"));
   if (!Number.isInteger(tabId)) {
     throw new Error("snapshot_tab requires numeric tabId");
   }
 
-  const includeHtml = args.includeHtml ?? runtimeConfig.includeHtml;
-  const includeText = args.includeText ?? runtimeConfig.includeText;
-  const includeSelection = args.includeSelection ?? runtimeConfig.includeSelection;
+  const includeHtml = pickArg(args, "includeHtml", "include_html") ?? runtimeConfig.includeHtml;
+  const includeText = pickArg(args, "includeText", "include_text") ?? runtimeConfig.includeText;
+  const includeSelection = pickArg(args, "includeSelection", "include_selection") ?? runtimeConfig.includeSelection;
 
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "ISOLATED",
-    func: collectorMain,
-    args: [{ includeHtml, includeText, includeSelection }]
-  });
+  const [result] = await withTimeout(
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      func: collectorMain,
+      args: [{ includeHtml, includeText, includeSelection }]
+    }),
+    SNAPSHOT_EXECUTE_TIMEOUT_MS,
+    "snapshot executeScript"
+  );
 
   if (!result || !result.result) {
     throw new Error("No snapshot result from executeScript");
@@ -332,26 +363,30 @@ async function handleCommand(message) {
       };
     } else if (command === "set_config") {
       const next = {};
-      if (typeof args.endpoint === "string") {
-        next.endpoint = normalizeUrl(args.endpoint);
+      const endpoint = pickArg(args, "endpoint", "ws_endpoint");
+      if (typeof endpoint === "string") {
+        next.endpoint = normalizeUrl(endpoint);
       }
-      if (Number.isInteger(args.reconnectMs) && args.reconnectMs > 99) {
-        next.reconnectMs = args.reconnectMs;
+      const reconnectMs = Number(pickArg(args, "reconnectMs", "reconnect_ms"));
+      if (Number.isInteger(reconnectMs) && reconnectMs > 99) {
+        next.reconnectMs = reconnectMs;
       }
-      if (Number.isInteger(args.maxHtmlBytes) && args.maxHtmlBytes > 9_999) {
-        next.maxHtmlBytes = args.maxHtmlBytes;
+      const maxHtmlBytes = Number(pickArg(args, "maxHtmlBytes", "max_html_bytes"));
+      if (Number.isInteger(maxHtmlBytes) && maxHtmlBytes > 9_999) {
+        next.maxHtmlBytes = maxHtmlBytes;
       }
-      if (Number.isInteger(args.maxTextBytes) && args.maxTextBytes > 1_000) {
-        next.maxTextBytes = args.maxTextBytes;
+      const maxTextBytes = Number(pickArg(args, "maxTextBytes", "max_text_bytes"));
+      if (Number.isInteger(maxTextBytes) && maxTextBytes > 1_000) {
+        next.maxTextBytes = maxTextBytes;
       }
-      if (Object.hasOwn(args, "includeHtml")) {
-        next.includeHtml = Boolean(args.includeHtml);
+      if (Object.hasOwn(args, "includeHtml") || Object.hasOwn(args, "include_html")) {
+        next.includeHtml = Boolean(pickArg(args, "includeHtml", "include_html"));
       }
-      if (Object.hasOwn(args, "includeText")) {
-        next.includeText = Boolean(args.includeText);
+      if (Object.hasOwn(args, "includeText") || Object.hasOwn(args, "include_text")) {
+        next.includeText = Boolean(pickArg(args, "includeText", "include_text"));
       }
-      if (Object.hasOwn(args, "includeSelection")) {
-        next.includeSelection = Boolean(args.includeSelection);
+      if (Object.hasOwn(args, "includeSelection") || Object.hasOwn(args, "include_selection")) {
+        next.includeSelection = Boolean(pickArg(args, "includeSelection", "include_selection"));
       }
 
       await saveConfig(next);
