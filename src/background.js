@@ -14,6 +14,9 @@ const STORAGE_KEY = "xposeConfig";
 const CONNECTION_ALARM_NAME = "xpose-connection-heartbeat";
 const CONNECTION_ALARM_MINUTES = 1;
 const SNAPSHOT_EXECUTE_TIMEOUT_MS = 7000;
+const SNAPSHOT_PRIMARY_WORLD_TIMEOUT_MS = 2500;
+const SNAPSHOT_FALLBACK_WORLD_TIMEOUT_MS = 4500;
+const TAB_READY_TIMEOUT_MS = 2000;
 
 let runtimeConfig = { ...DEFAULT_CONFIG };
 let socket = null;
@@ -143,6 +146,44 @@ async function withTimeout(promise, ms, label) {
   }
 }
 
+async function waitForTabComplete(tabId, timeoutMs) {
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.status === "complete") {
+    return tab;
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(async () => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      try {
+        const latest = await chrome.tabs.get(tabId);
+        resolve(latest);
+      } catch (error) {
+        reject(error);
+      }
+    }, timeoutMs);
+
+    async function onUpdated(updatedTabId, changeInfo) {
+      if (updatedTabId !== tabId) {
+        return;
+      }
+      if (changeInfo.status !== "complete") {
+        return;
+      }
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      try {
+        const latest = await chrome.tabs.get(tabId);
+        resolve(latest);
+      } catch (error) {
+        reject(error);
+      }
+    }
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+}
+
 function mapWindow(win) {
   return {
     id: win.id,
@@ -268,17 +309,50 @@ async function snapshotTab(args = {}) {
   const includeText = pickArg(args, "includeText", "include_text") ?? runtimeConfig.includeText;
   const includeSelection = pickArg(args, "includeSelection", "include_selection") ?? runtimeConfig.includeSelection;
   const maxTextChars = Math.max(1000, Math.floor(runtimeConfig.maxTextBytes / 2));
+  const tab = await waitForTabComplete(tabId, TAB_READY_TIMEOUT_MS);
+  const url = String(tab.url || "");
 
-  const [result] = await withTimeout(
-    chrome.scripting.executeScript({
-      target: { tabId },
-      world: "ISOLATED",
-      func: collectorMain,
-      args: [{ includeHtml, includeText, includeSelection, maxTextChars, maxSelectionChars: maxTextChars }]
-    }),
-    SNAPSHOT_EXECUTE_TIMEOUT_MS,
-    "snapshot executeScript"
-  );
+  if (tab.discarded) {
+    throw new Error("Tab is discarded; activate or reload tab before snapshot");
+  }
+  if (!/^https?:/i.test(url)) {
+    throw new Error(`Unsupported tab URL for snapshot: ${url}`);
+  }
+
+  async function runSnapshot(world, timeoutMs) {
+    return withTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId },
+        world,
+        injectImmediately: true,
+        func: collectorMain,
+        args: [{ includeHtml, includeText, includeSelection, maxTextChars, maxSelectionChars: maxTextChars }]
+      }),
+      timeoutMs,
+      `snapshot executeScript (${world})`
+    );
+  }
+
+  let execResult;
+  let lastError;
+  try {
+    execResult = await runSnapshot("MAIN", SNAPSHOT_PRIMARY_WORLD_TIMEOUT_MS);
+  } catch (error) {
+    lastError = error;
+    log("warn", "snapshot.world_main.failed", { tabId, error: String(error) });
+    try {
+      execResult = await runSnapshot("ISOLATED", SNAPSHOT_FALLBACK_WORLD_TIMEOUT_MS);
+    } catch (fallbackError) {
+      lastError = fallbackError;
+      log("error", "snapshot.world_isolated.failed", { tabId, error: String(fallbackError) });
+    }
+  }
+
+  if (!execResult) {
+    throw new Error(String(lastError?.message || lastError || `snapshot executeScript timed out after ${SNAPSHOT_EXECUTE_TIMEOUT_MS}ms`));
+  }
+
+  const [result] = execResult;
 
   if (!result || !result.result) {
     throw new Error("No snapshot result from executeScript");
