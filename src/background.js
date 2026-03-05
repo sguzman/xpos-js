@@ -14,8 +14,9 @@ const STORAGE_KEY = "xposeConfig";
 const CONNECTION_ALARM_NAME = "xpose-connection-heartbeat";
 const CONNECTION_ALARM_MINUTES = 1;
 const SNAPSHOT_EXECUTE_TIMEOUT_MS = 7000;
-const SNAPSHOT_PRIMARY_WORLD_TIMEOUT_MS = 2500;
-const SNAPSHOT_FALLBACK_WORLD_TIMEOUT_MS = 4500;
+const SNAPSHOT_FIRST_ATTEMPT_TIMEOUT_MS = 2200;
+const SNAPSHOT_RETRY_AFTER_WAKE_TIMEOUT_MS = 3200;
+const SNAPSHOT_WAKE_DELAY_MS = 250;
 const TAB_READY_TIMEOUT_MS = 2000;
 
 let runtimeConfig = { ...DEFAULT_CONFIG };
@@ -184,6 +185,36 @@ async function waitForTabComplete(tabId, timeoutMs) {
   });
 }
 
+async function sleep(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function wakeTabForSnapshot(tab) {
+  const windowId = tab.windowId;
+  const activeTabs = await chrome.tabs.query({ active: true, windowId });
+  const previousActiveTab = activeTabs[0];
+  const shouldSwitch = previousActiveTab && previousActiveTab.id !== tab.id;
+
+  if (shouldSwitch) {
+    await chrome.tabs.update(tab.id, { active: true });
+    await sleep(SNAPSHOT_WAKE_DELAY_MS);
+  }
+
+  return { previousActiveTabId: previousActiveTab?.id, didSwitch: Boolean(shouldSwitch) };
+}
+
+async function restorePreviouslyActiveTab(windowId, previousActiveTabId, didSwitch) {
+  if (!didSwitch || !Number.isInteger(previousActiveTabId)) {
+    return;
+  }
+
+  try {
+    await chrome.tabs.update(previousActiveTabId, { active: true });
+  } catch (error) {
+    log("warn", "snapshot.restore_previous_tab.failed", { previousActiveTabId, windowId, error: String(error) });
+  }
+}
+
 function mapWindow(win) {
   return {
     id: win.id,
@@ -333,18 +364,25 @@ async function snapshotTab(args = {}) {
     );
   }
 
+  log("info", "snapshot.preflight", { tabId, url, status: tab.status, active: tab.active, discarded: tab.discarded });
+
   let execResult;
   let lastError;
   try {
-    execResult = await runSnapshot("MAIN", SNAPSHOT_PRIMARY_WORLD_TIMEOUT_MS);
+    execResult = await runSnapshot("ISOLATED", SNAPSHOT_FIRST_ATTEMPT_TIMEOUT_MS);
   } catch (error) {
     lastError = error;
-    log("warn", "snapshot.world_main.failed", { tabId, error: String(error) });
+    log("warn", "snapshot.first_attempt.failed", { tabId, error: String(error) });
+
+    const wake = await wakeTabForSnapshot(tab);
+    log("info", "snapshot.wake_tab", { tabId, didSwitch: wake.didSwitch, previousActiveTabId: wake.previousActiveTabId });
     try {
-      execResult = await runSnapshot("ISOLATED", SNAPSHOT_FALLBACK_WORLD_TIMEOUT_MS);
-    } catch (fallbackError) {
-      lastError = fallbackError;
-      log("error", "snapshot.world_isolated.failed", { tabId, error: String(fallbackError) });
+      execResult = await runSnapshot("ISOLATED", SNAPSHOT_RETRY_AFTER_WAKE_TIMEOUT_MS);
+    } catch (retryError) {
+      lastError = retryError;
+      log("error", "snapshot.retry_after_wake.failed", { tabId, error: String(retryError) });
+    } finally {
+      await restorePreviouslyActiveTab(tab.windowId, wake.previousActiveTabId, wake.didSwitch);
     }
   }
 
