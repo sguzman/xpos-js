@@ -199,8 +199,44 @@ function collectorMain(args) {
   const maxSelectionChars = Number(args?.maxSelectionChars || 0);
 
   const html = includeHtml ? document.documentElement.outerHTML : "";
-  let text = includeText ? (document.body ? document.body.innerText : "") : "";
+  let text = "";
   let selection = includeSelection ? String(window.getSelection?.() || "") : "";
+
+  if (includeText) {
+    const root = document.body;
+    if (root) {
+      const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "CANVAS", "TEMPLATE"]);
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const chunks = [];
+      let total = 0;
+      let node = walker.nextNode();
+
+      while (node) {
+        const parent = node.parentElement;
+        if (parent && !skipTags.has(parent.tagName)) {
+          const raw = node.nodeValue || "";
+          const normalized = raw.replace(/\\s+/g, " ").trim();
+          if (normalized) {
+            const remaining = maxTextChars > 0 ? maxTextChars - total : Infinity;
+            if (remaining <= 0) {
+              break;
+            }
+            if (normalized.length <= remaining) {
+              chunks.push(normalized);
+              total += normalized.length + 1;
+            } else {
+              chunks.push(normalized.slice(0, remaining));
+              total = maxTextChars;
+              break;
+            }
+          }
+        }
+        node = walker.nextNode();
+      }
+
+      text = chunks.join(" ");
+    }
+  }
 
   if (includeText && maxTextChars > 0 && text.length > maxTextChars) {
     text = text.slice(0, maxTextChars);
