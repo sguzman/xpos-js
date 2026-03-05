@@ -3,7 +3,7 @@
   "name": "xpose",
   "version": "0.1.0",
   "description": "Live tab/session bridge for local self-hosted consumers.",
-  "permissions": ["tabs", "scripting", "storage"],
+  "permissions": ["tabs", "scripting", "storage", "alarms"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "src/background.js",

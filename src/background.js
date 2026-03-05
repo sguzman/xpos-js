@@ -11,6 +11,9 @@ const DEFAULT_CONFIG = Object.freeze({
 });
 
 const STORAGE_KEY = "xposeConfig";
+const CONNECTION_ALARM_NAME = "xpose-connection-heartbeat";
+const CONNECTION_ALARM_MINUTES = 1;
+const SOCKET_KEEPALIVE_MS = 15000;
 
 let runtimeConfig = { ...DEFAULT_CONFIG };
 let socket = null;
@@ -19,6 +22,7 @@ let connectionSeq = 0;
 let outboundSeq = 0;
 let eventsRegistered = false;
 let bootstrapInFlight = null;
+let keepaliveTimer = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -241,6 +245,32 @@ function safeSend(data) {
   return true;
 }
 
+function startKeepalive() {
+  if (keepaliveTimer) {
+    clearInterval(keepaliveTimer);
+  }
+
+  keepaliveTimer = setInterval(() => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    safeSend({
+      type: "keepalive",
+      ts: nowIso(),
+      seq: ++outboundSeq
+    });
+  }, SOCKET_KEEPALIVE_MS);
+}
+
+function stopKeepalive() {
+  if (!keepaliveTimer) {
+    return;
+  }
+  clearInterval(keepaliveTimer);
+  keepaliveTimer = null;
+}
+
 function sendEvent(name, payload) {
   const traceId = nextTraceId("evt");
   const ok = safeSend({
@@ -266,6 +296,14 @@ function scheduleReconnect() {
     reconnectTimer = null;
     connectSocket();
   }, runtimeConfig.reconnectMs);
+}
+
+async function ensureConnectionAlarm() {
+  const traceId = nextTraceId("alarm");
+  await chrome.alarms.create(CONNECTION_ALARM_NAME, {
+    periodInMinutes: CONNECTION_ALARM_MINUTES
+  });
+  log("info", "alarm.ensure_connection_heartbeat", { periodInMinutes: CONNECTION_ALARM_MINUTES }, traceId);
 }
 
 async function handleCommand(message) {
@@ -375,6 +413,7 @@ async function connectSocket() {
 
   socket.onopen = async () => {
     log("info", "socket.open", { endpoint }, traceId);
+    startKeepalive();
     const [windows, tabs] = await Promise.all([listWindows(), listTabs()]);
     safeSend({
       type: "hello",
@@ -413,6 +452,7 @@ async function connectSocket() {
       { code: event.code, reason: event.reason, wasClean: event.wasClean, reconnectMs: runtimeConfig.reconnectMs },
       traceId
     );
+    stopKeepalive();
     socket = null;
     scheduleReconnect();
   };
@@ -460,6 +500,7 @@ async function bootstrap(reason = "default") {
     log("info", "bootstrap.start", { version: EXT_VERSION, reason }, traceId);
     await loadConfig();
     registerEventBridge();
+    await ensureConnectionAlarm();
     await connectSocket();
     log("info", "bootstrap.ready", { reason }, traceId);
   })();
@@ -476,12 +517,33 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   log("info", "runtime.installed", details, traceId);
   await loadConfig();
   await saveConfig(runtimeConfig);
+  await ensureConnectionAlarm();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   const traceId = nextTraceId("lifecycle");
   log("info", "runtime.startup", {}, traceId);
   void bootstrap("runtime.onStartup");
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== CONNECTION_ALARM_NAME) {
+    return;
+  }
+
+  const traceId = nextTraceId("alarm");
+  log("info", "alarm.heartbeat", {}, traceId);
+  void connectSocket();
+});
+
+chrome.runtime.onSuspend.addListener(() => {
+  const traceId = nextTraceId("lifecycle");
+  log("warn", "runtime.suspend", {}, traceId);
+});
+
+chrome.runtime.onSuspendCanceled?.addListener(() => {
+  const traceId = nextTraceId("lifecycle");
+  log("info", "runtime.suspend_canceled", {}, traceId);
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
