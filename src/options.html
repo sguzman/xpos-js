@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>xpose Settings</title>
+    <link rel="stylesheet" href="./options.css" />
+  </head>
+  <body>
+    <main class="page">
+      <h1>xpose</h1>
+      <p class="sub">Configure local bridge settings for your self-hosted server.</p>
+
+      <form id="settings-form">
+        <label>
+          WebSocket endpoint
+          <input id="endpoint" name="endpoint" type="url" required placeholder="ws://127.0.0.1:17373/ws" />
+        </label>
+
+        <label>
+          Reconnect delay (ms)
+          <input id="reconnectMs" name="reconnectMs" type="number" min="100" step="100" required />
+        </label>
+
+        <label>
+          Max HTML bytes
+          <input id="maxHtmlBytes" name="maxHtmlBytes" type="number" min="10000" step="1000" required />
+        </label>
+
+        <label>
+          Max text bytes
+          <input id="maxTextBytes" name="maxTextBytes" type="number" min="1000" step="1000" required />
+        </label>
+
+        <label class="row">
+          <input id="includeHtml" name="includeHtml" type="checkbox" />
+          Include HTML in snapshots
+        </label>
+
+        <label class="row">
+          <input id="includeText" name="includeText" type="checkbox" />
+          Include text in snapshots
+        </label>
+
+        <label class="row">
+          <input id="includeSelection" name="includeSelection" type="checkbox" />
+          Include current selection in snapshots
+        </label>
+
+        <div class="buttons">
+          <button type="submit">Save</button>
+          <button id="reload" type="button">Reconnect</button>
+        </div>
+      </form>
+
+      <pre id="status" aria-live="polite"></pre>
+    </main>
+
+    <script type="module" src="./options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "xpose",
+  "version": "0.1.0",
+  "description": "Live tab/session bridge for local self-hosted consumers.",
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "options_page": "src/options.html",
+  "action": {
+    "default_title": "xpose"
+  }
+}
