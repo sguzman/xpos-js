@@ -18,6 +18,7 @@ const SNAPSHOT_FIRST_ATTEMPT_TIMEOUT_MS = 2200;
 const SNAPSHOT_RETRY_AFTER_WAKE_TIMEOUT_MS = 3200;
 const SNAPSHOT_WAKE_DELAY_MS = 250;
 const TAB_READY_TIMEOUT_MS = 2000;
+const TAB_WAKE_READY_TIMEOUT_MS = 4000;
 
 let runtimeConfig = { ...DEFAULT_CONFIG };
 let socket = null;
@@ -215,6 +216,26 @@ async function restorePreviouslyActiveTab(windowId, previousActiveTabId, didSwit
   }
 }
 
+async function prepareTabForSnapshot(tab) {
+  let currentTab = tab;
+  let wake = { previousActiveTabId: undefined, didSwitch: false };
+
+  if (tab.discarded || tab.status !== "complete" || !tab.active) {
+    wake = await wakeTabForSnapshot(tab);
+    currentTab = await chrome.tabs.get(tab.id);
+  }
+
+  if (currentTab.discarded) {
+    log("info", "snapshot.tab.discarded_reload", { tabId: tab.id, url: currentTab.url || "" });
+    await chrome.tabs.reload(tab.id);
+    currentTab = await waitForTabComplete(tab.id, TAB_WAKE_READY_TIMEOUT_MS);
+  } else if (currentTab.status !== "complete") {
+    currentTab = await waitForTabComplete(tab.id, TAB_READY_TIMEOUT_MS);
+  }
+
+  return { tab: currentTab, wake };
+}
+
 function mapWindow(win) {
   return {
     id: win.id,
@@ -340,13 +361,13 @@ async function snapshotTab(args = {}) {
   const includeText = pickArg(args, "includeText", "include_text") ?? runtimeConfig.includeText;
   const includeSelection = pickArg(args, "includeSelection", "include_selection") ?? runtimeConfig.includeSelection;
   const maxTextChars = Math.max(1000, Math.floor(runtimeConfig.maxTextBytes / 2));
-  const tab = await waitForTabComplete(tabId, TAB_READY_TIMEOUT_MS);
+  const initialTab = await chrome.tabs.get(tabId);
+  const prepared = await prepareTabForSnapshot(initialTab);
+  const tab = prepared.tab;
+  const wake = prepared.wake;
   const url = String(tab.url || "");
-
-  if (tab.discarded) {
-    throw new Error("Tab is discarded; activate or reload tab before snapshot");
-  }
   if (!/^https?:/i.test(url)) {
+    await restorePreviouslyActiveTab(tab.windowId, wake.previousActiveTabId, wake.didSwitch);
     throw new Error(`Unsupported tab URL for snapshot: ${url}`);
   }
 
@@ -364,7 +385,14 @@ async function snapshotTab(args = {}) {
     );
   }
 
-  log("info", "snapshot.preflight", { tabId, url, status: tab.status, active: tab.active, discarded: tab.discarded });
+  log("info", "snapshot.preflight", {
+    tabId,
+    url,
+    status: tab.status,
+    active: tab.active,
+    discarded: tab.discarded,
+    didSwitch: wake.didSwitch
+  });
 
   let execResult;
   let lastError;
@@ -374,19 +402,17 @@ async function snapshotTab(args = {}) {
     lastError = error;
     log("warn", "snapshot.first_attempt.failed", { tabId, error: String(error) });
 
-    const wake = await wakeTabForSnapshot(tab);
     log("info", "snapshot.wake_tab", { tabId, didSwitch: wake.didSwitch, previousActiveTabId: wake.previousActiveTabId });
     try {
       execResult = await runSnapshot("ISOLATED", SNAPSHOT_RETRY_AFTER_WAKE_TIMEOUT_MS);
     } catch (retryError) {
       lastError = retryError;
       log("error", "snapshot.retry_after_wake.failed", { tabId, error: String(retryError) });
-    } finally {
-      await restorePreviouslyActiveTab(tab.windowId, wake.previousActiveTabId, wake.didSwitch);
     }
   }
 
   if (!execResult) {
+    await restorePreviouslyActiveTab(tab.windowId, wake.previousActiveTabId, wake.didSwitch);
     throw new Error(String(lastError?.message || lastError || `snapshot executeScript timed out after ${SNAPSHOT_EXECUTE_TIMEOUT_MS}ms`));
   }
 
@@ -401,7 +427,7 @@ async function snapshotTab(args = {}) {
   const text = trimByBytes(payload.text, runtimeConfig.maxTextBytes);
   const selection = trimByBytes(payload.selection, runtimeConfig.maxTextBytes);
 
-  return {
+  const response = {
     tabId,
     title: payload.title,
     url: payload.url,
@@ -421,6 +447,9 @@ async function snapshotTab(args = {}) {
       selection: { truncated: selection.truncated, bytes: selection.bytes, maxBytes: runtimeConfig.maxTextBytes }
     }
   };
+
+  await restorePreviouslyActiveTab(tab.windowId, wake.previousActiveTabId, wake.didSwitch);
+  return response;
 }
 
 function safeSend(data) {
