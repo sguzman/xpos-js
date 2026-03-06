@@ -13,6 +13,7 @@ const DEFAULT_CONFIG = Object.freeze({
 const STORAGE_KEY = "xposeConfig";
 const CONNECTION_ALARM_NAME = "xpose-connection-heartbeat";
 const CONNECTION_ALARM_MINUTES = 1;
+const SOCKET_KEEPALIVE_MS = 20_000;
 const SNAPSHOT_EXECUTE_TIMEOUT_MS = 7000;
 const SNAPSHOT_FIRST_ATTEMPT_TIMEOUT_MS = 2200;
 const SNAPSHOT_RETRY_AFTER_WAKE_TIMEOUT_MS = 3200;
@@ -27,6 +28,7 @@ let connectionSeq = 0;
 let outboundSeq = 0;
 let eventsRegistered = false;
 let bootstrapInFlight = null;
+let keepaliveTimer = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -635,6 +637,29 @@ function safeSend(data) {
   return true;
 }
 
+function startKeepalive() {
+  if (keepaliveTimer) {
+    clearInterval(keepaliveTimer);
+  }
+
+  keepaliveTimer = setInterval(() => {
+    safeSend({
+      type: "keepalive",
+      ts: nowIso(),
+      seq: ++outboundSeq
+    });
+  }, SOCKET_KEEPALIVE_MS);
+}
+
+function stopKeepalive() {
+  if (!keepaliveTimer) {
+    return;
+  }
+
+  clearInterval(keepaliveTimer);
+  keepaliveTimer = null;
+}
+
 function sendEvent(name, payload) {
   const traceId = nextTraceId("evt");
   const ok = safeSend({
@@ -797,6 +822,7 @@ async function connectSocket() {
 
   socket.onopen = async () => {
     log("info", "socket.open", { endpoint }, traceId);
+    startKeepalive();
     const [windows, tabs] = await Promise.all([listWindows(), listTabs()]);
     safeSend({
       type: "hello",
@@ -835,6 +861,7 @@ async function connectSocket() {
       { code: event.code, reason: event.reason, wasClean: event.wasClean, reconnectMs: runtimeConfig.reconnectMs },
       traceId
     );
+    stopKeepalive();
     socket = null;
     scheduleReconnect();
   };
