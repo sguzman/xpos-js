@@ -6,13 +6,13 @@ Extend `xpose` from a read-only browser session bridge into a controlled tab man
 
 Target capabilities:
 
-- close tab
-- open tab
-- focus tab
-- move tab
-- group tabs
-- reload tab
-- query active/current tab state
+- [ ] close tab
+- [ ] open tab
+- [ ] focus tab
+- [ ] move tab
+- [ ] group tabs
+- [ ] reload tab
+- [ ] query active/current tab state
 
 ## Scope
 
@@ -42,25 +42,25 @@ This roadmap does not cover:
 
 Add the following extension commands:
 
-- `close_tab`
-- `open_tab`
-- `focus_tab`
-- `move_tab`
-- `group_tabs`
-- `reload_tab`
-- `get_active_tab`
-- `get_tab_state`
+- [ ] `close_tab`
+- [ ] `open_tab`
+- [ ] `focus_tab`
+- [ ] `move_tab`
+- [ ] `group_tabs`
+- [ ] `reload_tab`
+- [ ] `get_active_tab`
+- [ ] `get_tab_state`
 
 Recommended HTTP surface in `browsr`:
 
-- `GET /v1/tabs/active`
-- `GET /v1/tabs/{tab_id}`
-- `POST /v1/tabs/open`
-- `POST /v1/tabs/{tab_id}/focus`
-- `POST /v1/tabs/{tab_id}/reload`
-- `POST /v1/tabs/{tab_id}/close`
-- `POST /v1/tabs/{tab_id}/move`
-- `POST /v1/tab-groups`
+- [ ] `GET /v1/tabs/active`
+- [ ] `GET /v1/tabs/{tab_id}`
+- [ ] `POST /v1/tabs/open`
+- [ ] `POST /v1/tabs/{tab_id}/focus`
+- [ ] `POST /v1/tabs/{tab_id}/reload`
+- [ ] `POST /v1/tabs/{tab_id}/close`
+- [ ] `POST /v1/tabs/{tab_id}/move`
+- [ ] `POST /v1/tab-groups`
 
 ## Command Shapes
 
@@ -244,18 +244,18 @@ Return lightweight live state for a tab without doing DOM extraction:
 
 Add command handlers in [background.js](/win/linux/Code/web/extensions/xpos-js/src/background.js):
 
-- `open_tab`: use `chrome.tabs.create`
-- `close_tab`: use `chrome.tabs.remove`
-- `focus_tab`: use `chrome.tabs.update` and `chrome.windows.update`
-- `move_tab`: use `chrome.tabs.move`
-- `group_tabs`: use `chrome.tabs.group` and `chrome.tabGroups.update`
-- `reload_tab`: use `chrome.tabs.reload`
-- `get_active_tab`: use `chrome.tabs.query({ active: true, ... })`
-- `get_tab_state`: use `chrome.tabs.get`
+- [ ] `open_tab`: use `chrome.tabs.create`
+- [ ] `close_tab`: use `chrome.tabs.remove`
+- [ ] `focus_tab`: use `chrome.tabs.update` and `chrome.windows.update`
+- [ ] `move_tab`: use `chrome.tabs.move`
+- [ ] `group_tabs`: use `chrome.tabs.group` and `chrome.tabGroups.update`
+- [ ] `reload_tab`: use `chrome.tabs.reload`
+- [ ] `get_active_tab`: use `chrome.tabs.query({ active: true, ... })`
+- [ ] `get_tab_state`: use `chrome.tabs.get`
 
 Manifest updates likely required:
 
-- add `"tabGroups"` permission if grouping is implemented directly
+- [ ] add `"tabGroups"` permission if grouping is implemented directly
 
 Implementation notes:
 
@@ -284,12 +284,12 @@ Recommended server behavior:
 
 Implement first:
 
-- `get_active_tab`
-- `get_tab_state`
-- `focus_tab`
-- `reload_tab`
-- `close_tab`
-- `open_tab`
+- [ ] `get_active_tab`
+- [ ] `get_tab_state`
+- [ ] `focus_tab`
+- [ ] `reload_tab`
+- [ ] `close_tab`
+- [ ] `open_tab`
 
 Reason:
 
@@ -301,7 +301,7 @@ Reason:
 
 Implement:
 
-- `move_tab`
+- [ ] `move_tab`
 
 Reason:
 
@@ -312,7 +312,7 @@ Reason:
 
 Implement:
 
-- `group_tabs`
+- [ ] `group_tabs`
 
 Reason:
 
@@ -324,25 +324,25 @@ Reason:
 
 For the extension:
 
-- verify command success for active and background tabs
-- verify focus restore behavior does not regress snapshot flow
-- verify move across windows preserves expected index
-- verify group creation returns stable `groupId`
+- [ ] verify command success for active and background tabs
+- [ ] verify focus restore behavior does not regress snapshot flow
+- [ ] verify move across windows preserves expected index
+- [ ] verify group creation returns stable `groupId`
 
 For `browsr`:
 
-- add integration tests per endpoint
-- assert the server returns `502` only on extension command failure
-- assert command timeouts stay below configured request timeout budget
+- [ ] add integration tests per endpoint
+- [ ] assert the server returns `502` only on extension command failure
+- [ ] assert command timeouts stay below configured request timeout budget
 
 Manual tests:
 
-1. Open a tab into a target window and verify returned `tab.id`.
-2. Focus a background tab and verify window focus changes.
-3. Move a tab to index `0` and confirm ordering.
-4. Group three tabs and verify color/title in Edge.
-5. Reload a discarded tab and query state until `status=complete`.
-6. Close a tab and confirm subsequent `get_tab_state` fails cleanly.
+- [ ] Open a tab into a target window and verify returned `tab.id`.
+- [ ] Focus a background tab and verify window focus changes.
+- [ ] Move a tab to index `0` and confirm ordering.
+- [ ] Group three tabs and verify color/title in Edge.
+- [ ] Reload a discarded tab and query state until `status=complete`.
+- [ ] Close a tab and confirm subsequent `get_tab_state` fails cleanly.
 
 ## Risks
 
@@ -355,13 +355,13 @@ Manual tests:
 
 Build in this order:
 
-1. `get_active_tab`
-2. `get_tab_state`
-3. `focus_tab`
-4. `reload_tab`
-5. `open_tab`
-6. `close_tab`
-7. `move_tab`
-8. `group_tabs`
+- [ ] `get_active_tab`
+- [ ] `get_tab_state`
+- [ ] `focus_tab`
+- [ ] `reload_tab`
+- [ ] `open_tab`
+- [ ] `close_tab`
+- [ ] `move_tab`
+- [ ] `group_tabs`
 
 This order minimizes protocol churn and gives clients useful control quickly.
