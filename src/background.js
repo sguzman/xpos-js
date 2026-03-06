@@ -133,6 +133,10 @@ function pickArg(args, camelKey, snakeKey) {
   return undefined;
 }
 
+function hasArg(args, camelKey, snakeKey) {
+  return Object.hasOwn(args, camelKey) || Object.hasOwn(args, snakeKey);
+}
+
 async function withTimeout(promise, ms, label) {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
@@ -250,6 +254,16 @@ function mapWindow(win) {
   };
 }
 
+function mapTabGroup(group) {
+  return {
+    id: group.id,
+    windowId: group.windowId,
+    collapsed: group.collapsed,
+    color: group.color,
+    title: group.title
+  };
+}
+
 function mapTab(tab) {
   return {
     id: tab.id,
@@ -260,9 +274,12 @@ function mapTab(tab) {
     active: tab.active,
     pinned: tab.pinned,
     audible: tab.audible,
+    highlighted: tab.highlighted,
     discarded: tab.discarded,
     autoDiscardable: tab.autoDiscardable,
     index: tab.index,
+    groupId: tab.groupId,
+    mutedInfo: tab.mutedInfo,
     favIconUrl: tab.favIconUrl,
     lastAccessed: tab.lastAccessed
   };
@@ -281,6 +298,163 @@ async function listTabs(args = {}) {
   }
   const tabs = await chrome.tabs.query(queryInfo);
   return tabs.map(mapTab);
+}
+
+async function getTabState(args = {}) {
+  const tabId = Number(pickArg(args, "tabId", "tab_id"));
+  if (!Number.isInteger(tabId)) {
+    throw new Error("get_tab_state requires numeric tabId");
+  }
+
+  const tab = await chrome.tabs.get(tabId);
+  return { tab: mapTab(tab) };
+}
+
+async function getActiveTab(args = {}) {
+  const queryInfo = { active: true };
+  const windowId = Number(pickArg(args, "windowId", "window_id"));
+
+  if (Number.isInteger(windowId)) {
+    queryInfo.windowId = windowId;
+  } else {
+    queryInfo.lastFocusedWindow = true;
+  }
+
+  const [tab] = await chrome.tabs.query(queryInfo);
+  if (!tab) {
+    throw new Error("No active tab found");
+  }
+
+  return { tab: mapTab(tab) };
+}
+
+async function openTab(args = {}) {
+  const url = String(pickArg(args, "url", "url") || "").trim();
+  if (!url) {
+    throw new Error("open_tab requires url");
+  }
+
+  const createProperties = {
+    url,
+    active: hasArg(args, "active", "active") ? Boolean(pickArg(args, "active", "active")) : true
+  };
+
+  const windowId = Number(pickArg(args, "windowId", "window_id"));
+  if (Number.isInteger(windowId)) {
+    createProperties.windowId = windowId;
+  }
+
+  const index = Number(pickArg(args, "index", "index"));
+  if (Number.isInteger(index) && index >= 0) {
+    createProperties.index = index;
+  }
+
+  const openerTabId = Number(pickArg(args, "openerTabId", "opener_tab_id"));
+  if (Number.isInteger(openerTabId)) {
+    createProperties.openerTabId = openerTabId;
+  }
+
+  const tab = await chrome.tabs.create(createProperties);
+  return { tab: mapTab(tab) };
+}
+
+async function closeTab(args = {}) {
+  const tabId = Number(pickArg(args, "tabId", "tab_id"));
+  if (!Number.isInteger(tabId)) {
+    throw new Error("close_tab requires numeric tabId");
+  }
+
+  await chrome.tabs.remove(tabId);
+  return { closedTabId: tabId };
+}
+
+async function focusTab(args = {}) {
+  const tabId = Number(pickArg(args, "tabId", "tab_id"));
+  if (!Number.isInteger(tabId)) {
+    throw new Error("focus_tab requires numeric tabId");
+  }
+
+  const tab = await chrome.tabs.get(tabId);
+  await chrome.windows.update(tab.windowId, { focused: true });
+  const updated = await chrome.tabs.update(tabId, { active: true });
+  const win = await chrome.windows.get(updated.windowId);
+  return { tab: mapTab(updated), window: mapWindow(win) };
+}
+
+async function moveTab(args = {}) {
+  const tabId = Number(pickArg(args, "tabId", "tab_id"));
+  const index = Number(pickArg(args, "index", "index"));
+  if (!Number.isInteger(tabId) || !Number.isInteger(index) || index < 0) {
+    throw new Error("move_tab requires numeric tabId and non-negative index");
+  }
+
+  const moveProperties = { index };
+  const windowId = Number(pickArg(args, "windowId", "window_id"));
+  if (Number.isInteger(windowId)) {
+    moveProperties.windowId = windowId;
+  }
+
+  const moved = await chrome.tabs.move(tabId, moveProperties);
+  const tab = Array.isArray(moved) ? moved[0] : moved;
+  return { tab: mapTab(tab) };
+}
+
+async function reloadTab(args = {}) {
+  const tabId = Number(pickArg(args, "tabId", "tab_id"));
+  if (!Number.isInteger(tabId)) {
+    throw new Error("reload_tab requires numeric tabId");
+  }
+
+  const bypassCache = Boolean(pickArg(args, "bypassCache", "bypass_cache"));
+  const waitForComplete = Boolean(pickArg(args, "waitForComplete", "wait_for_complete"));
+  await chrome.tabs.reload(tabId, { bypassCache });
+  const tab = waitForComplete ? await waitForTabComplete(tabId, TAB_WAKE_READY_TIMEOUT_MS) : await chrome.tabs.get(tabId);
+  return { tab: mapTab(tab), reloaded: true, waitForComplete };
+}
+
+async function groupTabs(args = {}) {
+  const rawTabIds = pickArg(args, "tabIds", "tab_ids");
+  const tabIds = Array.isArray(rawTabIds) ? rawTabIds.map((value) => Number(value)).filter(Number.isInteger) : [];
+  if (tabIds.length === 0) {
+    throw new Error("group_tabs requires non-empty tabIds");
+  }
+
+  const groupIdArg = Number(pickArg(args, "groupId", "group_id"));
+  const createProperties = pickArg(args, "createProperties", "create_properties") || {};
+  const groupProperties = pickArg(args, "groupProperties", "group_properties") || {};
+
+  const groupCall = { tabIds };
+  if (Number.isInteger(groupIdArg) && groupIdArg >= 0) {
+    groupCall.groupId = groupIdArg;
+  } else {
+    const createWindowId = Number(pickArg(createProperties, "windowId", "window_id"));
+    if (Number.isInteger(createWindowId)) {
+      groupCall.createProperties = { windowId: createWindowId };
+    }
+  }
+
+  const groupId = await chrome.tabs.group(groupCall);
+  const updateProperties = {};
+  if (typeof groupProperties.title === "string") {
+    updateProperties.title = groupProperties.title;
+  }
+  if (typeof groupProperties.color === "string") {
+    updateProperties.color = groupProperties.color;
+  }
+  if (Object.hasOwn(groupProperties, "collapsed")) {
+    updateProperties.collapsed = Boolean(groupProperties.collapsed);
+  }
+  if (Object.keys(updateProperties).length > 0) {
+    await chrome.tabGroups.update(groupId, updateProperties);
+  }
+
+  const tabs = await Promise.all(tabIds.map((tabId) => chrome.tabs.get(tabId)));
+  const group = await chrome.tabGroups.get(groupId);
+  return {
+    groupId,
+    group: mapTabGroup(group),
+    tabs: tabs.map(mapTab)
+  };
 }
 
 function collectorMain(args) {
@@ -511,6 +685,22 @@ async function handleCommand(message) {
       result = { tabs: await listTabs(args) };
     } else if (command === "list_windows") {
       result = { windows: await listWindows() };
+    } else if (command === "get_active_tab") {
+      result = await getActiveTab(args);
+    } else if (command === "get_tab_state") {
+      result = await getTabState(args);
+    } else if (command === "open_tab") {
+      result = await openTab(args);
+    } else if (command === "close_tab") {
+      result = await closeTab(args);
+    } else if (command === "focus_tab") {
+      result = await focusTab(args);
+    } else if (command === "move_tab") {
+      result = await moveTab(args);
+    } else if (command === "group_tabs") {
+      result = await groupTabs(args);
+    } else if (command === "reload_tab") {
+      result = await reloadTab(args);
     } else if (command === "snapshot_tab") {
       result = await snapshotTab(args);
     } else if (command === "get_state") {

@@ -6,13 +6,13 @@ Extend `xpose` from a read-only browser session bridge into a controlled tab man
 
 Target capabilities:
 
-- [ ] close tab
-- [ ] open tab
-- [ ] focus tab
-- [ ] move tab
-- [ ] group tabs
-- [ ] reload tab
-- [ ] query active/current tab state
+- [x] close tab
+- [x] open tab
+- [x] focus tab
+- [x] move tab
+- [x] group tabs
+- [x] reload tab
+- [x] query active/current tab state
 
 ## Scope
 
@@ -42,25 +42,25 @@ This roadmap does not cover:
 
 Add the following extension commands:
 
-- [ ] `close_tab`
-- [ ] `open_tab`
-- [ ] `focus_tab`
-- [ ] `move_tab`
-- [ ] `group_tabs`
-- [ ] `reload_tab`
-- [ ] `get_active_tab`
-- [ ] `get_tab_state`
+- [x] `close_tab`
+- [x] `open_tab`
+- [x] `focus_tab`
+- [x] `move_tab`
+- [x] `group_tabs`
+- [x] `reload_tab`
+- [x] `get_active_tab`
+- [x] `get_tab_state`
 
 Recommended HTTP surface in `browsr`:
 
-- [ ] `GET /v1/tabs/active`
-- [ ] `GET /v1/tabs/{tab_id}`
-- [ ] `POST /v1/tabs/open`
-- [ ] `POST /v1/tabs/{tab_id}/focus`
-- [ ] `POST /v1/tabs/{tab_id}/reload`
-- [ ] `POST /v1/tabs/{tab_id}/close`
-- [ ] `POST /v1/tabs/{tab_id}/move`
-- [ ] `POST /v1/tab-groups`
+- [x] `GET /v1/tabs/active`
+- [x] `GET /v1/tabs/{tab_id}`
+- [x] `POST /v1/tabs/open`
+- [x] `POST /v1/tabs/{tab_id}/focus`
+- [x] `POST /v1/tabs/{tab_id}/reload`
+- [x] `POST /v1/tabs/{tab_id}/close`
+- [x] `POST /v1/tabs/{tab_id}/move`
+- [x] `POST /v1/tab-groups`
 
 ## Command Shapes
 
@@ -244,18 +244,18 @@ Return lightweight live state for a tab without doing DOM extraction:
 
 Add command handlers in [background.js](/win/linux/Code/web/extensions/xpos-js/src/background.js):
 
-- [ ] `open_tab`: use `chrome.tabs.create`
-- [ ] `close_tab`: use `chrome.tabs.remove`
-- [ ] `focus_tab`: use `chrome.tabs.update` and `chrome.windows.update`
-- [ ] `move_tab`: use `chrome.tabs.move`
-- [ ] `group_tabs`: use `chrome.tabs.group` and `chrome.tabGroups.update`
-- [ ] `reload_tab`: use `chrome.tabs.reload`
-- [ ] `get_active_tab`: use `chrome.tabs.query({ active: true, ... })`
-- [ ] `get_tab_state`: use `chrome.tabs.get`
+- [x] `open_tab`: use `chrome.tabs.create`
+- [x] `close_tab`: use `chrome.tabs.remove`
+- [x] `focus_tab`: use `chrome.tabs.update` and `chrome.windows.update`
+- [x] `move_tab`: use `chrome.tabs.move`
+- [x] `group_tabs`: use `chrome.tabs.group` and `chrome.tabGroups.update`
+- [x] `reload_tab`: use `chrome.tabs.reload`
+- [x] `get_active_tab`: use `chrome.tabs.query({ active: true, ... })`
+- [x] `get_tab_state`: use `chrome.tabs.get`
 
 Manifest updates likely required:
 
-- [ ] add `"tabGroups"` permission if grouping is implemented directly
+- [x] add `"tabGroups"` permission if grouping is implemented directly
 
 Implementation notes:
 
@@ -284,12 +284,12 @@ Recommended server behavior:
 
 Implement first:
 
-- [ ] `get_active_tab`
-- [ ] `get_tab_state`
-- [ ] `focus_tab`
-- [ ] `reload_tab`
-- [ ] `close_tab`
-- [ ] `open_tab`
+- [x] `get_active_tab`
+- [x] `get_tab_state`
+- [x] `focus_tab`
+- [x] `reload_tab`
+- [x] `close_tab`
+- [x] `open_tab`
 
 Reason:
 
@@ -301,7 +301,7 @@ Reason:
 
 Implement:
 
-- [ ] `move_tab`
+- [x] `move_tab`
 
 Reason:
 
@@ -312,7 +312,7 @@ Reason:
 
 Implement:
 
-- [ ] `group_tabs`
+- [x] `group_tabs`
 
 Reason:
 
@@ -355,13 +355,13 @@ Manual tests:
 
 Build in this order:
 
-- [ ] `get_active_tab`
-- [ ] `get_tab_state`
-- [ ] `focus_tab`
-- [ ] `reload_tab`
-- [ ] `open_tab`
-- [ ] `close_tab`
-- [ ] `move_tab`
-- [ ] `group_tabs`
+- [x] `get_active_tab`
+- [x] `get_tab_state`
+- [x] `focus_tab`
+- [x] `reload_tab`
+- [x] `open_tab`
+- [x] `close_tab`
+- [x] `move_tab`
+- [x] `group_tabs`
 
 This order minimizes protocol churn and gives clients useful control quickly.
