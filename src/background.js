@@ -14,9 +14,12 @@ const STORAGE_KEY = "xposeConfig";
 const CONNECTION_ALARM_NAME = "xpose-connection-heartbeat";
 const CONNECTION_ALARM_MINUTES = 1;
 const SOCKET_KEEPALIVE_MS = 20_000;
-const SNAPSHOT_EXECUTE_TIMEOUT_MS = 7000;
-const SNAPSHOT_FIRST_ATTEMPT_TIMEOUT_MS = 2200;
-const SNAPSHOT_RETRY_AFTER_WAKE_TIMEOUT_MS = 3200;
+const SNAPSHOT_META_TIMEOUT_MS = 1200;
+const SNAPSHOT_HTML_TIMEOUT_MS = 4500;
+const SNAPSHOT_TEXT_TIMEOUT_MS = 4500;
+const SNAPSHOT_RETRY_META_TIMEOUT_MS = 1800;
+const SNAPSHOT_RETRY_HTML_TIMEOUT_MS = 6000;
+const SNAPSHOT_RETRY_TEXT_TIMEOUT_MS = 6000;
 const SNAPSHOT_WAKE_DELAY_MS = 250;
 const TAB_READY_TIMEOUT_MS = 2000;
 const TAB_WAKE_READY_TIMEOUT_MS = 4000;
@@ -459,71 +462,68 @@ async function groupTabs(args = {}) {
   };
 }
 
-function collectorMain(args) {
+function collectSnapshotMeta(args) {
   const startedAt = new Date().toISOString();
-  const includeHtml = Boolean(args?.includeHtml);
-  const includeText = Boolean(args?.includeText);
   const includeSelection = Boolean(args?.includeSelection);
-  const maxTextChars = Number(args?.maxTextChars || 0);
   const maxSelectionChars = Number(args?.maxSelectionChars || 0);
-
-  const html = includeHtml ? document.documentElement.outerHTML : "";
-  let text = "";
   let selection = includeSelection ? String(window.getSelection?.() || "") : "";
-
-  if (includeText) {
-    const root = document.body;
-    if (root) {
-      const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "CANVAS", "TEMPLATE"]);
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      const chunks = [];
-      let total = 0;
-      let node = walker.nextNode();
-
-      while (node) {
-        const parent = node.parentElement;
-        if (parent && !skipTags.has(parent.tagName)) {
-          const raw = node.nodeValue || "";
-          const normalized = raw.replace(/\\s+/g, " ").trim();
-          if (normalized) {
-            const remaining = maxTextChars > 0 ? maxTextChars - total : Infinity;
-            if (remaining <= 0) {
-              break;
-            }
-            if (normalized.length <= remaining) {
-              chunks.push(normalized);
-              total += normalized.length + 1;
-            } else {
-              chunks.push(normalized.slice(0, remaining));
-              total = maxTextChars;
-              break;
-            }
-          }
-        }
-        node = walker.nextNode();
-      }
-
-      text = chunks.join(" ");
-    }
-  }
-
-  if (includeText && maxTextChars > 0 && text.length > maxTextChars) {
-    text = text.slice(0, maxTextChars);
-  }
   if (includeSelection && maxSelectionChars > 0 && selection.length > maxSelectionChars) {
     selection = selection.slice(0, maxSelectionChars);
   }
 
   return {
     startedAt,
-    completedAt: new Date().toISOString(),
     title: document.title,
     url: location.href,
     lang: document.documentElement.lang || "",
-    html,
-    text,
     selection,
     readyState: document.readyState
+  };
+}
+
+function collectSnapshotHtml() {
+  return {
+    html: document.documentElement.outerHTML
+  };
+}
+
+function collectSnapshotText(args) {
+  const maxTextChars = Number(args?.maxTextChars || 0);
+  const root = document.body;
+  if (!root) {
+    return { text: "" };
+  }
+
+  const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "CANVAS", "TEMPLATE"]);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const chunks = [];
+  let total = 0;
+  let node = walker.nextNode();
+
+  while (node) {
+    const parent = node.parentElement;
+    if (parent && !skipTags.has(parent.tagName)) {
+      const raw = node.nodeValue || "";
+      const normalized = raw.replace(/\s+/g, " ").trim();
+      if (normalized) {
+        const remaining = maxTextChars > 0 ? maxTextChars - total : Infinity;
+        if (remaining <= 0) {
+          break;
+        }
+        if (normalized.length <= remaining) {
+          chunks.push(normalized);
+          total += normalized.length + 1;
+        } else {
+          chunks.push(normalized.slice(0, remaining));
+          break;
+        }
+      }
+    }
+    node = walker.nextNode();
+  }
+
+  return {
+    text: chunks.join(" ")
   };
 }
 
@@ -547,18 +547,60 @@ async function snapshotTab(args = {}) {
     throw new Error(`Unsupported tab URL for snapshot: ${url}`);
   }
 
-  async function runSnapshot(world, timeoutMs) {
-    return withTimeout(
+  async function executeCollector(func, collectorArgs, timeoutMs, label) {
+    const [result] = await withTimeout(
       chrome.scripting.executeScript({
         target: { tabId },
-        world,
+        world: "ISOLATED",
         injectImmediately: true,
-        func: collectorMain,
-        args: [{ includeHtml, includeText, includeSelection, maxTextChars, maxSelectionChars: maxTextChars }]
+        func,
+        args: collectorArgs ? [collectorArgs] : []
       }),
       timeoutMs,
-      `snapshot executeScript (${world})`
+      label
     );
+
+    if (!result || !result.result) {
+      throw new Error(`${label} returned no result`);
+    }
+
+    return result.result;
+  }
+
+  async function collectSnapshot(timeoutBudget) {
+    const meta = await executeCollector(
+      collectSnapshotMeta,
+      { includeSelection, maxSelectionChars: maxTextChars },
+      timeoutBudget.meta,
+      "snapshot meta executeScript"
+    );
+
+    let html = "";
+    if (includeHtml) {
+      html = (await executeCollector(
+        collectSnapshotHtml,
+        null,
+        timeoutBudget.html,
+        "snapshot html executeScript"
+      )).html || "";
+    }
+
+    let text = "";
+    if (includeText) {
+      text = (await executeCollector(
+        collectSnapshotText,
+        { maxTextChars },
+        timeoutBudget.text,
+        "snapshot text executeScript"
+      )).text || "";
+    }
+
+    return {
+      ...meta,
+      html,
+      text,
+      completedAt: new Date().toISOString()
+    };
   }
 
   log("info", "snapshot.preflight", {
@@ -573,14 +615,22 @@ async function snapshotTab(args = {}) {
   let execResult;
   let lastError;
   try {
-    execResult = await runSnapshot("ISOLATED", SNAPSHOT_FIRST_ATTEMPT_TIMEOUT_MS);
+    execResult = await collectSnapshot({
+      meta: SNAPSHOT_META_TIMEOUT_MS,
+      html: SNAPSHOT_HTML_TIMEOUT_MS,
+      text: SNAPSHOT_TEXT_TIMEOUT_MS
+    });
   } catch (error) {
     lastError = error;
     log("warn", "snapshot.first_attempt.failed", { tabId, error: String(error) });
 
     log("info", "snapshot.wake_tab", { tabId, didSwitch: wake.didSwitch, previousActiveTabId: wake.previousActiveTabId });
     try {
-      execResult = await runSnapshot("ISOLATED", SNAPSHOT_RETRY_AFTER_WAKE_TIMEOUT_MS);
+      execResult = await collectSnapshot({
+        meta: SNAPSHOT_RETRY_META_TIMEOUT_MS,
+        html: SNAPSHOT_RETRY_HTML_TIMEOUT_MS,
+        text: SNAPSHOT_RETRY_TEXT_TIMEOUT_MS
+      });
     } catch (retryError) {
       lastError = retryError;
       log("error", "snapshot.retry_after_wake.failed", { tabId, error: String(retryError) });
@@ -589,16 +639,10 @@ async function snapshotTab(args = {}) {
 
   if (!execResult) {
     await restorePreviouslyActiveTab(tab.windowId, wake.previousActiveTabId, wake.didSwitch);
-    throw new Error(String(lastError?.message || lastError || `snapshot executeScript timed out after ${SNAPSHOT_EXECUTE_TIMEOUT_MS}ms`));
+    throw new Error(String(lastError?.message || lastError || "snapshot collection failed"));
   }
 
-  const [result] = execResult;
-
-  if (!result || !result.result) {
-    throw new Error("No snapshot result from executeScript");
-  }
-
-  const payload = result.result;
+  const payload = execResult;
   const html = trimByBytes(payload.html, runtimeConfig.maxHtmlBytes);
   const text = trimByBytes(payload.text, runtimeConfig.maxTextBytes);
   const selection = trimByBytes(payload.selection, runtimeConfig.maxTextBytes);
