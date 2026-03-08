@@ -199,6 +199,38 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isHostPermissionError(error) {
+  const message = String(error?.message || error || "");
+  return message.includes("Cannot access contents of the page");
+}
+
+function getCommandErrorCode(error) {
+  if (isHostPermissionError(error)) {
+    return "HOST_PERMISSION_DENIED";
+  }
+
+  const message = String(error?.message || error || "");
+  if (message.includes("Unsupported tab URL")) {
+    return "UNSUPPORTED_TAB_URL";
+  }
+  if (message.includes("timed out")) {
+    return "SNAPSHOT_TIMEOUT";
+  }
+
+  return "COMMAND_FAILED";
+}
+
+async function hasHostPermissionForUrl(url) {
+  if (!/^https?:/i.test(url)) {
+    return false;
+  }
+
+  const parsed = new URL(url);
+  return chrome.permissions.contains({
+    origins: [`${parsed.origin}/*`]
+  });
+}
+
 async function wakeTabForSnapshot(tab) {
   const windowId = tab.windowId;
   const activeTabs = await chrome.tabs.query({ active: true, windowId });
@@ -243,6 +275,11 @@ async function prepareTabForSnapshot(tab) {
   }
 
   return { tab: currentTab, wake };
+}
+
+async function reloadTabForSnapshot(tabId) {
+  await chrome.tabs.reload(tabId);
+  return waitForTabComplete(tabId, TAB_WAKE_READY_TIMEOUT_MS);
 }
 
 function mapWindow(win) {
@@ -609,7 +646,8 @@ async function snapshotTab(args = {}) {
     status: tab.status,
     active: tab.active,
     discarded: tab.discarded,
-    didSwitch: wake.didSwitch
+    didSwitch: wake.didSwitch,
+    hasHostPermission: await hasHostPermissionForUrl(url)
   });
 
   let execResult;
@@ -634,6 +672,21 @@ async function snapshotTab(args = {}) {
     } catch (retryError) {
       lastError = retryError;
       log("error", "snapshot.retry_after_wake.failed", { tabId, error: String(retryError) });
+    }
+  }
+
+  if (!execResult && isHostPermissionError(lastError)) {
+    log("warn", "snapshot.permission_error.retrying_after_reload", { tabId, url, error: String(lastError) });
+    try {
+      await reloadTabForSnapshot(tabId);
+      execResult = await collectSnapshot({
+        meta: SNAPSHOT_RETRY_META_TIMEOUT_MS,
+        html: SNAPSHOT_RETRY_HTML_TIMEOUT_MS,
+        text: SNAPSHOT_RETRY_TEXT_TIMEOUT_MS
+      });
+    } catch (reloadRetryError) {
+      lastError = reloadRetryError;
+      log("error", "snapshot.retry_after_reload.failed", { tabId, error: String(reloadRetryError) });
     }
   }
 
@@ -837,7 +890,7 @@ async function handleCommand(message) {
       seq: ++outboundSeq,
       ok: false,
       error: {
-        code: "COMMAND_FAILED",
+        code: getCommandErrorCode(error),
         message: String(error?.message || error)
       }
     });
