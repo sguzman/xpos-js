@@ -14,6 +14,19 @@ const STORAGE_KEY = "xposeConfig";
 const CONNECTION_ALARM_NAME = "xpose-connection-heartbeat";
 const CONNECTION_ALARM_MINUTES = 1;
 const SOCKET_KEEPALIVE_MS = 20_000;
+const DEBUGGER_PROTOCOL_VERSION = "1.3";
+const IMPORT_BUNDLE_DEFAULTS = Object.freeze({
+  reload: true,
+  captureHtml: true,
+  captureAssets: true,
+  captureText: true,
+  captureSelection: true,
+  captureScreenshot: false,
+  waitForNetworkIdleMs: 1500,
+  settleTimeoutMs: 30_000,
+  maxAssetBytes: 5_000_000,
+  maxTotalBytes: 75_000_000
+});
 const SNAPSHOT_META_TIMEOUT_MS = 1200;
 const SNAPSHOT_HTML_TIMEOUT_MS = 4500;
 const SNAPSHOT_TEXT_TIMEOUT_MS = 4500;
@@ -32,6 +45,11 @@ let outboundSeq = 0;
 let eventsRegistered = false;
 let bootstrapInFlight = null;
 let keepaliveTimer = null;
+let debuggerListenersRegistered = false;
+let importAssetSequence = 0;
+
+const importSessions = new Map();
+const importSessionsByTabId = new Map();
 
 function nowIso() {
   return new Date().toISOString();
@@ -142,6 +160,154 @@ function hasArg(args, camelKey, snakeKey) {
   return Object.hasOwn(args, camelKey) || Object.hasOwn(args, snakeKey);
 }
 
+function createImportJobId() {
+  return `imp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createAssetId() {
+  importAssetSequence += 1;
+  return `asset_${importAssetSequence.toString(36)}_${Date.now().toString(36)}`;
+}
+
+function hashText(input) {
+  let hash = 2166136261;
+  const text = String(input || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function getImportAssetKey(request) {
+  return [
+    request.url || "",
+    request.documentURL || "",
+    request.resourceType || "Other",
+    request.frameId || ""
+  ].join("|");
+}
+
+function createDeterministicAssetId(request) {
+  const ordinal = Number(request.assetOrdinal || 1);
+  return `asset_${hashText(getImportAssetKey(request))}_${ordinal.toString(36)}`;
+}
+
+function normalizeImportOptions(args = {}) {
+  const waitForNetworkIdleMs = Number(pickArg(args, "waitForNetworkIdleMs", "wait_for_network_idle_ms"));
+  const settleTimeoutMs = Number(pickArg(args, "settleTimeoutMs", "settle_timeout_ms"));
+  const maxAssetBytes = Number(pickArg(args, "maxAssetBytes", "max_asset_bytes"));
+  const maxTotalBytes = Number(pickArg(args, "maxTotalBytes", "max_total_bytes"));
+
+  return {
+    reload: hasArg(args, "reload", "reload") ? Boolean(pickArg(args, "reload", "reload")) : IMPORT_BUNDLE_DEFAULTS.reload,
+    captureHtml: hasArg(args, "captureHtml", "capture_html")
+      ? Boolean(pickArg(args, "captureHtml", "capture_html"))
+      : IMPORT_BUNDLE_DEFAULTS.captureHtml,
+    captureAssets: hasArg(args, "captureAssets", "capture_assets")
+      ? Boolean(pickArg(args, "captureAssets", "capture_assets"))
+      : IMPORT_BUNDLE_DEFAULTS.captureAssets,
+    captureText: hasArg(args, "captureText", "capture_text")
+      ? Boolean(pickArg(args, "captureText", "capture_text"))
+      : IMPORT_BUNDLE_DEFAULTS.captureText,
+    captureSelection: hasArg(args, "captureSelection", "capture_selection")
+      ? Boolean(pickArg(args, "captureSelection", "capture_selection"))
+      : IMPORT_BUNDLE_DEFAULTS.captureSelection,
+    captureScreenshot: hasArg(args, "captureScreenshot", "capture_screenshot")
+      ? Boolean(pickArg(args, "captureScreenshot", "capture_screenshot"))
+      : IMPORT_BUNDLE_DEFAULTS.captureScreenshot,
+    waitForNetworkIdleMs:
+      Number.isInteger(waitForNetworkIdleMs) && waitForNetworkIdleMs >= 250
+        ? waitForNetworkIdleMs
+        : IMPORT_BUNDLE_DEFAULTS.waitForNetworkIdleMs,
+    settleTimeoutMs:
+      Number.isInteger(settleTimeoutMs) && settleTimeoutMs >= 5_000
+        ? settleTimeoutMs
+        : IMPORT_BUNDLE_DEFAULTS.settleTimeoutMs,
+    maxAssetBytes:
+      Number.isInteger(maxAssetBytes) && maxAssetBytes >= 10_000
+        ? maxAssetBytes
+        : IMPORT_BUNDLE_DEFAULTS.maxAssetBytes,
+    maxTotalBytes:
+      Number.isInteger(maxTotalBytes) && maxTotalBytes >= 100_000
+        ? maxTotalBytes
+        : IMPORT_BUNDLE_DEFAULTS.maxTotalBytes
+  };
+}
+
+function makeImportSession(tabId, options) {
+  return {
+    jobId: createImportJobId(),
+    tabId,
+    status: "queued",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    startedAt: null,
+    completedAt: null,
+    error: null,
+    options,
+    attached: false,
+    loadEventFiredAt: null,
+    lastNetworkActivityAt: Date.now(),
+    inflightRequests: new Set(),
+    requests: new Map(),
+    assetsById: new Map(),
+    requestToAssetId: new Map(),
+    assetKeyCounts: new Map(),
+    totalAssetBytes: 0,
+    finalSnapshot: null,
+    screenshot: null,
+    wake: { previousActiveTabId: undefined, didSwitch: false },
+    detachedReason: null
+  };
+}
+
+function summarizeImportSession(session) {
+  return {
+    jobId: session.jobId,
+    tabId: session.tabId,
+    status: session.status,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    startedAt: session.startedAt,
+    completedAt: session.completedAt,
+    error: session.error,
+    options: session.options,
+    capture: {
+      attached: session.attached,
+      loadEventFiredAt: session.loadEventFiredAt ? new Date(session.loadEventFiredAt).toISOString() : null,
+      detachedReason: session.detachedReason
+    },
+    stats: {
+      requestsObserved: session.requests.size,
+      inflightRequests: session.inflightRequests.size,
+      assetsCaptured: session.assetsById.size,
+      totalAssetBytes: session.totalAssetBytes
+    }
+  };
+}
+
+function serializeAsset(asset) {
+  return {
+    assetId: asset.assetId,
+    requestId: asset.requestId,
+    url: asset.url,
+    documentURL: asset.documentURL,
+    resourceType: asset.resourceType,
+    mimeType: asset.mimeType,
+    status: asset.status,
+    assetOrdinal: asset.assetOrdinal,
+    servedFromCache: asset.servedFromCache,
+    fromDiskCache: asset.fromDiskCache,
+    fromServiceWorker: asset.fromServiceWorker,
+    base64Encoded: asset.base64Encoded,
+    bytes: asset.bytes,
+    headers: asset.headers,
+    bodyAvailable: typeof asset.body === "string",
+    error: asset.error
+  };
+}
+
 async function withTimeout(promise, ms, label) {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
@@ -217,6 +383,30 @@ function getCommandErrorCode(error) {
     return "SNAPSHOT_TIMEOUT";
   }
 
+  return "COMMAND_FAILED";
+}
+
+function getImportErrorCode(error) {
+  if (isHostPermissionError(error)) {
+    return "HOST_PERMISSION_DENIED";
+  }
+
+  const message = String(error?.message || error || "");
+  if (message.includes("Unsupported tab URL")) {
+    return "UNSUPPORTED_TAB_URL";
+  }
+  if (message.includes("already attached") || message.includes("Cannot attach")) {
+    return "IMPORT_BUNDLE_ATTACH_FAILED";
+  }
+  if (message.includes("waiting for network idle") || message.includes("timed out")) {
+    return "IMPORT_BUNDLE_TIMEOUT";
+  }
+  if (message.includes("cancelled")) {
+    return "IMPORT_BUNDLE_CANCELLED";
+  }
+  if (message.includes("reload")) {
+    return "IMPORT_BUNDLE_RELOAD_FAILED";
+  }
   return "COMMAND_FAILED";
 }
 
@@ -497,6 +687,450 @@ async function groupTabs(args = {}) {
     group: mapTabGroup(group),
     tabs: tabs.map(mapTab)
   };
+}
+
+function shouldCaptureAssetFromRequest(request) {
+  if (!request || !request.url) {
+    return false;
+  }
+  if (!/^https?:/i.test(request.url)) {
+    return false;
+  }
+  return request.resourceType !== "WebSocket";
+}
+
+async function sendDebuggerCommand(tabId, method, params = {}) {
+  return chrome.debugger.sendCommand({ tabId }, method, params);
+}
+
+function getImportSessionByTabId(tabId) {
+  const jobId = importSessionsByTabId.get(tabId);
+  return jobId ? importSessions.get(jobId) : null;
+}
+
+function markImportSessionUpdated(session, status) {
+  session.updatedAt = nowIso();
+  if (status) {
+    session.status = status;
+  }
+}
+
+function finalizeImportSession(session, status, error = null) {
+  session.status = status;
+  session.error = error;
+  session.updatedAt = nowIso();
+  session.completedAt = nowIso();
+}
+
+function ensureImportDebuggerListenersRegistered() {
+  if (debuggerListenersRegistered) {
+    return;
+  }
+
+  chrome.debugger.onEvent.addListener(async (source, method, params) => {
+    const tabId = Number(source?.tabId);
+    if (!Number.isInteger(tabId)) {
+      return;
+    }
+
+    const session = getImportSessionByTabId(tabId);
+    if (!session) {
+      return;
+    }
+
+    session.lastNetworkActivityAt = Date.now();
+
+    if (method === "Network.requestWillBeSent") {
+      const requestId = String(params.requestId || "");
+      const existing = session.requests.get(requestId) || {};
+      const next = {
+        ...existing,
+        requestId,
+        url: params.request?.url || existing.url || "",
+        documentURL: params.documentURL || existing.documentURL || "",
+        resourceType: params.type || existing.resourceType || "Other",
+        frameId: params.frameId || existing.frameId || "",
+        loaderId: params.loaderId || existing.loaderId || "",
+        initiator: params.initiator || existing.initiator || null
+      };
+      if (!existing.assetOrdinal && shouldCaptureAssetFromRequest(next)) {
+        const assetKey = getImportAssetKey(next);
+        const nextOrdinal = (session.assetKeyCounts.get(assetKey) || 0) + 1;
+        session.assetKeyCounts.set(assetKey, nextOrdinal);
+        next.assetOrdinal = nextOrdinal;
+      }
+      session.requests.set(requestId, next);
+      session.inflightRequests.add(requestId);
+      markImportSessionUpdated(session);
+      return;
+    }
+
+    if (method === "Network.requestServedFromCache") {
+      const requestId = String(params.requestId || "");
+      const existing = session.requests.get(requestId) || { requestId };
+      existing.servedFromCache = true;
+      session.requests.set(requestId, existing);
+      markImportSessionUpdated(session);
+      return;
+    }
+
+    if (method === "Network.responseReceived") {
+      const requestId = String(params.requestId || "");
+      const response = params.response || {};
+      const existing = session.requests.get(requestId) || { requestId };
+      session.requests.set(requestId, {
+        ...existing,
+        url: response.url || existing.url || "",
+        status: response.status || existing.status || null,
+        mimeType: response.mimeType || existing.mimeType || "",
+        headers: response.headers || existing.headers || {},
+        resourceType: params.type || existing.resourceType || "Other",
+        servedFromCache: Boolean(existing.servedFromCache || response.fromDiskCache),
+        fromDiskCache: Boolean(response.fromDiskCache),
+        fromServiceWorker: Boolean(response.fromServiceWorker)
+      });
+      markImportSessionUpdated(session);
+      return;
+    }
+
+    if (method === "Network.loadingFailed") {
+      const requestId = String(params.requestId || "");
+      const existing = session.requests.get(requestId) || { requestId };
+      existing.failed = true;
+      existing.error = params.errorText || "loading failed";
+      session.requests.set(requestId, existing);
+      session.inflightRequests.delete(requestId);
+      markImportSessionUpdated(session);
+      return;
+    }
+
+    if (method === "Network.loadingFinished") {
+      const requestId = String(params.requestId || "");
+      const existing = session.requests.get(requestId) || { requestId };
+      existing.finished = true;
+      existing.encodedDataLength = params.encodedDataLength || 0;
+      session.requests.set(requestId, existing);
+      session.inflightRequests.delete(requestId);
+      markImportSessionUpdated(session);
+
+      if (!session.options.captureAssets || !shouldCaptureAssetFromRequest(existing)) {
+        return;
+      }
+
+      if (session.totalAssetBytes >= session.options.maxTotalBytes) {
+        existing.error = "max total asset bytes exceeded";
+        session.requests.set(requestId, existing);
+        return;
+      }
+
+      try {
+        const body = await sendDebuggerCommand(tabId, "Network.getResponseBody", { requestId });
+        const text = String(body?.body || "");
+        const bytes = new TextEncoder().encode(text).length;
+        if (bytes > session.options.maxAssetBytes) {
+          existing.error = `asset exceeds maxAssetBytes (${session.options.maxAssetBytes})`;
+          session.requests.set(requestId, existing);
+          return;
+        }
+        if (session.totalAssetBytes + bytes > session.options.maxTotalBytes) {
+          existing.error = `asset exceeds remaining total budget (${session.options.maxTotalBytes})`;
+          session.requests.set(requestId, existing);
+          return;
+        }
+
+        const assetId = session.requestToAssetId.get(requestId) || createDeterministicAssetId(existing) || createAssetId();
+        session.requestToAssetId.set(requestId, assetId);
+        const asset = {
+          assetId,
+          requestId,
+          url: existing.url || "",
+          documentURL: existing.documentURL || "",
+          resourceType: existing.resourceType || "Other",
+          mimeType: existing.mimeType || "application/octet-stream",
+          status: existing.status || null,
+          assetOrdinal: Number(existing.assetOrdinal || 1),
+          servedFromCache: Boolean(existing.servedFromCache),
+          fromDiskCache: Boolean(existing.fromDiskCache),
+          fromServiceWorker: Boolean(existing.fromServiceWorker),
+          headers: existing.headers || {},
+          base64Encoded: Boolean(body?.base64Encoded),
+          body: text,
+          bytes,
+          error: null
+        };
+        session.assetsById.set(assetId, asset);
+        session.totalAssetBytes += bytes;
+      } catch (error) {
+        existing.error = String(error?.message || error);
+        session.requests.set(requestId, existing);
+      }
+      return;
+    }
+
+    if (method === "Page.loadEventFired") {
+      session.loadEventFiredAt = Date.now();
+      markImportSessionUpdated(session);
+    }
+  });
+
+  chrome.debugger.onDetach.addListener((source, reason) => {
+    const tabId = Number(source?.tabId);
+    if (!Number.isInteger(tabId)) {
+      return;
+    }
+
+    const session = getImportSessionByTabId(tabId);
+    if (!session) {
+      return;
+    }
+
+    session.attached = false;
+    session.detachedReason = reason;
+    if (!["completed", "failed", "cancelled"].includes(session.status)) {
+      finalizeImportSession(session, "failed", {
+        code: "IMPORT_BUNDLE_ATTACH_FAILED",
+        message: `debugger detached unexpectedly: ${reason}`
+      });
+    }
+  });
+
+  debuggerListenersRegistered = true;
+}
+
+async function detachImportDebugger(session) {
+  if (!session.attached) {
+    return;
+  }
+
+  try {
+    await chrome.debugger.detach({ tabId: session.tabId });
+  } catch (error) {
+    log("warn", "import.debugger.detach.failed", { tabId: session.tabId, error: String(error) });
+  } finally {
+    session.attached = false;
+  }
+}
+
+async function waitForImportNetworkIdle(session) {
+  const deadline = Date.now() + session.options.settleTimeoutMs;
+  while (Date.now() < deadline) {
+    if (session.status === "cancelled") {
+      throw new Error("Import bundle cancelled");
+    }
+
+    const idleForMs = Date.now() - session.lastNetworkActivityAt;
+    if (session.loadEventFiredAt && session.inflightRequests.size === 0 && idleForMs >= session.options.waitForNetworkIdleMs) {
+      return;
+    }
+
+    await sleep(150);
+  }
+
+  throw new Error(`Import bundle timed out after ${session.options.settleTimeoutMs}ms waiting for network idle`);
+}
+
+async function captureImportScreenshot(session) {
+  const tab = await chrome.tabs.get(session.tabId);
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  return {
+    contentType: "image/png",
+    dataUrl
+  };
+}
+
+async function runImportBundleCapture(session) {
+  const traceId = nextTraceId("import");
+  markImportSessionUpdated(session, "attaching");
+  session.startedAt = nowIso();
+  log("info", "import.start", { jobId: session.jobId, tabId: session.tabId, options: session.options }, traceId);
+
+  try {
+    ensureImportDebuggerListenersRegistered();
+    const initialTab = await chrome.tabs.get(session.tabId);
+    const prepared = await prepareTabForSnapshot(initialTab);
+    session.wake = prepared.wake;
+
+    await chrome.debugger.attach({ tabId: session.tabId }, DEBUGGER_PROTOCOL_VERSION);
+    session.attached = true;
+    markImportSessionUpdated(session, "capturing");
+
+    await sendDebuggerCommand(session.tabId, "Network.enable");
+    await sendDebuggerCommand(session.tabId, "Page.enable");
+
+    if (session.options.reload) {
+      await sendDebuggerCommand(session.tabId, "Page.reload", { ignoreCache: false });
+    }
+
+    await waitForImportNetworkIdle(session);
+    markImportSessionUpdated(session, "finalizing");
+
+    session.finalSnapshot = await snapshotTab({
+      tabId: session.tabId,
+      includeHtml: session.options.captureHtml,
+      includeText: session.options.captureText,
+      includeSelection: session.options.captureSelection
+    });
+
+    if (session.options.captureScreenshot) {
+      try {
+        session.screenshot = await captureImportScreenshot(session);
+      } catch (error) {
+        log("warn", "import.screenshot.failed", { jobId: session.jobId, error: String(error) }, traceId);
+      }
+    }
+
+    finalizeImportSession(session, "completed");
+    log(
+      "info",
+      "import.completed",
+      {
+        jobId: session.jobId,
+        tabId: session.tabId,
+        assetsCaptured: session.assetsById.size,
+        totalAssetBytes: session.totalAssetBytes
+      },
+      traceId
+    );
+  } catch (error) {
+    finalizeImportSession(session, "failed", {
+      code: getImportErrorCode(error),
+      message: String(error?.message || error)
+    });
+    log("error", "import.failed", { jobId: session.jobId, tabId: session.tabId, error: String(error) }, traceId);
+  } finally {
+    await detachImportDebugger(session);
+    const finalTab = await chrome.tabs.get(session.tabId).catch(() => null);
+    await restorePreviouslyActiveTab(finalTab?.windowId, session.wake.previousActiveTabId, session.wake.didSwitch);
+  }
+}
+
+async function startImportBundle(args = {}) {
+  const tabId = Number(pickArg(args, "tabId", "tab_id"));
+  if (!Number.isInteger(tabId)) {
+    throw new Error("start_import_bundle requires numeric tabId");
+  }
+  if (getImportSessionByTabId(tabId) && !["completed", "failed", "cancelled"].includes(getImportSessionByTabId(tabId).status)) {
+    throw new Error(`Import bundle already running for tab ${tabId}`);
+  }
+
+  const options = normalizeImportOptions(args);
+  const session = makeImportSession(tabId, options);
+  importSessions.set(session.jobId, session);
+  importSessionsByTabId.set(tabId, session.jobId);
+  void runImportBundleCapture(session);
+
+  return summarizeImportSession(session);
+}
+
+async function getImportBundleStatus(args = {}) {
+  const jobId = String(pickArg(args, "jobId", "job_id") || "");
+  const session = importSessions.get(jobId);
+  if (!session) {
+    throw new Error(`Unknown import bundle job: ${jobId}`);
+  }
+  return summarizeImportSession(session);
+}
+
+async function getImportBundleManifest(args = {}) {
+  const jobId = String(pickArg(args, "jobId", "job_id") || "");
+  const session = importSessions.get(jobId);
+  if (!session) {
+    throw new Error(`Unknown import bundle job: ${jobId}`);
+  }
+  if (session.status !== "completed") {
+    throw new Error(`Import bundle job ${jobId} is not completed`);
+  }
+
+  const assets = Array.from(session.assetsById.values())
+    .sort((left, right) => {
+      const leftKey = `${left.url}\u0000${left.assetOrdinal || 1}\u0000${left.requestId}`;
+      const rightKey = `${right.url}\u0000${right.assetOrdinal || 1}\u0000${right.requestId}`;
+      return leftKey.localeCompare(rightKey);
+    })
+    .map(serializeAsset);
+
+  return {
+    ...summarizeImportSession(session),
+    bundle: {
+      tab: session.finalSnapshot
+        ? {
+            id: session.tabId,
+            title: session.finalSnapshot.title,
+            url: session.finalSnapshot.url
+          }
+        : { id: session.tabId },
+      document: session.finalSnapshot
+        ? {
+            contentType: "text/html",
+            html: session.finalSnapshot.html,
+            text: session.finalSnapshot.text,
+            selection: session.finalSnapshot.selection
+          }
+        : null,
+      capture: {
+        startedAt: session.startedAt,
+        completedAt: session.completedAt,
+        loadEventFiredAt: session.loadEventFiredAt ? new Date(session.loadEventFiredAt).toISOString() : null,
+        waitForNetworkIdleMs: session.options.waitForNetworkIdleMs,
+        settleTimeoutMs: session.options.settleTimeoutMs
+      },
+      screenshot: session.screenshot
+        ? {
+            contentType: session.screenshot.contentType,
+            available: true
+          }
+        : null,
+      assets
+    }
+  };
+}
+
+async function getImportBundleAsset(args = {}) {
+  const jobId = String(pickArg(args, "jobId", "job_id") || "");
+  const assetId = String(pickArg(args, "assetId", "asset_id") || "");
+  const session = importSessions.get(jobId);
+  if (!session) {
+    throw new Error(`Unknown import bundle job: ${jobId}`);
+  }
+
+  if (assetId === "screenshot" && session.screenshot) {
+    return {
+      jobId,
+      assetId,
+      contentType: session.screenshot.contentType,
+      base64Encoded: false,
+      body: session.screenshot.dataUrl
+    };
+  }
+
+  const asset = session.assetsById.get(assetId);
+  if (!asset) {
+    throw new Error(`Unknown import bundle asset: ${assetId}`);
+  }
+
+  return {
+    jobId,
+    asset: serializeAsset(asset),
+    contentType: asset.mimeType || "application/octet-stream",
+    base64Encoded: asset.base64Encoded,
+    body: asset.body
+  };
+}
+
+async function cancelImportBundle(args = {}) {
+  const jobId = String(pickArg(args, "jobId", "job_id") || "");
+  const session = importSessions.get(jobId);
+  if (!session) {
+    throw new Error(`Unknown import bundle job: ${jobId}`);
+  }
+
+  finalizeImportSession(session, "cancelled", {
+    code: "IMPORT_BUNDLE_CANCELLED",
+    message: "Import bundle cancelled by caller"
+  });
+  await detachImportDebugger(session);
+  importSessionsByTabId.delete(session.tabId);
+  return summarizeImportSession(session);
 }
 
 function collectSnapshotMeta(args) {
@@ -823,6 +1457,16 @@ async function handleCommand(message) {
       result = await groupTabs(args);
     } else if (command === "reload_tab") {
       result = await reloadTab(args);
+    } else if (command === "start_import_bundle") {
+      result = await startImportBundle(args);
+    } else if (command === "get_import_bundle_status") {
+      result = await getImportBundleStatus(args);
+    } else if (command === "get_import_bundle_manifest") {
+      result = await getImportBundleManifest(args);
+    } else if (command === "get_import_bundle_asset") {
+      result = await getImportBundleAsset(args);
+    } else if (command === "cancel_import_bundle") {
+      result = await cancelImportBundle(args);
     } else if (command === "snapshot_tab") {
       result = await snapshotTab(args);
     } else if (command === "get_state") {

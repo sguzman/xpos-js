@@ -5,7 +5,8 @@ MV3 extension for Edge/Chromium that exposes live tab and window introspection t
 ## What it does
 
 - Streams live tab/window events across all browser windows.
-- Handles server commands to list windows, list tabs, and snapshot a tab's DOM/HTML/text.
+- Handles server commands to list windows, list tabs, snapshot a tab's DOM/HTML/text, and manipulate tabs.
+- Supports debugger-backed `import-bundle` jobs that reload a tab, capture asset bodies, and expose a reconstructable bundle manifest.
 - Uses structured trace logging with timestamps and trace IDs for all lifecycle, socket, and command operations.
 - Provides an options page for runtime config.
 
@@ -36,7 +37,20 @@ Supported commands:
 - `get_state`
 - `list_windows`
 - `list_tabs`
+- `get_active_tab`
+- `get_tab_state`
+- `open_tab`
+- `close_tab`
+- `focus_tab`
+- `move_tab`
+- `group_tabs`
+- `reload_tab`
 - `snapshot_tab`
+- `start_import_bundle`
+- `get_import_bundle_status`
+- `get_import_bundle_manifest`
+- `get_import_bundle_asset`
+- `cancel_import_bundle`
 - `set_config`
 
 ## Build
@@ -61,3 +75,5 @@ Build output is copied to `dist/xpose`.
 - Works across all tabs in all normal browser windows within the same profile.
 - `edge://*` and other privileged pages are restricted by browser policy.
 - Snapshot payload size is capped by `maxHtmlBytes` and `maxTextBytes`.
+- `import-bundle` is intentionally heavier than `snapshot`: it attaches `chrome.debugger`, reloads the tab, records network assets, then detaches.
+- Debugger-backed capture may show Chromium debugger UX and will momentarily disturb the target tab because reload is part of the capture model.
