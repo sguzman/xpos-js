@@ -2,9 +2,9 @@
 
 ## Goal
 
-Add a second, heavier retrieval mode to `xpose` and `browsr` that captures a tab as a reconstructable import bundle.
+Add a second, heavier retrieval mode to `xpose` that captures a tab as a reconstructable import bundle.
 
-The system should support two different products:
+The extension should support two different products:
 
 - [x] `snapshot`: fast tab inspection for title, URL, HTML, text, selection, and quick state
 - [x] `import-bundle`: debugger-backed, reload-driven capture for a near-faithful recreation of the tab and the assets it loaded
@@ -34,16 +34,16 @@ Purpose:
 - [x] intentionally heavy
 - [x] explicit user-requested archival/import operation
 - [x] reload the tab and record page assets during load
-- [x] return enough data for downstream clients to recreate the tab without new HTML or asset requests to origin
+- [x] return enough data for downstream consumers to recreate the tab without new HTML or asset requests to origin
 
 ## Target Outcome
 
-Given a tab ID, downstream clients should be able to request:
+Given a tab ID, downstream consumers should be able to request:
 
 - [x] final HTML document
 - [x] asset manifest for the tab
 - [x] asset bodies already observed by the browser during reload
-- [x] metadata required to rewrite asset references to local or server-hosted bundle URLs
+- [x] metadata required to rewrite asset references to local or consumer-hosted bundle URLs
 - [x] optional screenshot for verification/debugging
 
 ## Hard Constraint
@@ -67,12 +67,15 @@ This roadmap covers:
 
 - [x] debugger-based capture in [src/background.js](/win/linux/Code/web/extensions/xpos-js/src/background.js)
 - [x] manifest permission updates in [manifest.json](/win/linux/Code/web/extensions/xpos-js/manifest.json)
-- [x] new `browsr` endpoints and request models in [api.rs](/win/linux/Code/web/extensions/xpos-js/tmp/browsr/src/api.rs)
-- [x] capture job state and timeout handling in `browsr`
-- [x] bundle schema for downstream clients
+- [x] command protocol additions exposed by the extension
+- [x] in-memory capture job state inside the extension
+- [x] bundle schema emitted by the extension
 
 This roadmap does not cover:
 
+- [ ] consumer HTTP API design
+- [ ] consumer storage or persistence strategy
+- [ ] consumer-side HTML rewriting pipeline
 - [ ] perfect replay of authenticated app state
 - [ ] full-service-worker emulation
 - [ ] browser-global cache export
@@ -84,7 +87,7 @@ This roadmap does not cover:
 - [x] dynamic pages may not replay identically after reload
 - [x] debugger attachment may show browser UX/warnings depending on Chromium behavior
 - [x] long imports can consume significant memory
-- [ ] large pages with many assets need streaming or persistence, not one giant in-memory payload
+- [ ] large pages with many assets need a future persistence/export strategy outside the extension worker
 
 ## High-Level Architecture
 
@@ -98,60 +101,53 @@ This roadmap does not cover:
 - [x] capture final HTML after load settles
 - [x] detach debugger when the session completes or fails
 
-### `browsr` responsibilities
-
-- [x] expose a heavy import endpoint separate from `snapshot`
-- [x] manage long-running capture jobs
-- [x] stream or stage bundle content
-- [x] serve captured asset bytes to clients
-- [ ] optionally persist bundles to disk
-
-### GUI client responsibilities
+### Downstream consumer responsibilities
 
 - [ ] request an import bundle explicitly
-- [ ] show progress / loading state
-- [ ] consume a manifest plus local bundle URLs instead of re-fetching origin assets
+- [ ] poll job state or listen for progress through its own transport
+- [ ] consume a manifest plus extension-provided asset records instead of re-fetching origin assets
+- [ ] optionally persist captured assets outside the extension
 
-## Recommended API Surface
+## Command Surface
 
 ### Lightweight path
 
-- [x] `POST /v1/tabs/{tab_id}/snapshot`
+- [x] `snapshot_tab`
 
 ### Heavy import path
 
-- [x] `POST /v1/tabs/{tab_id}/import-bundle`
-- [x] `GET /v1/import-jobs/{job_id}`
-- [x] `GET /v1/import-jobs/{job_id}/manifest`
-- [x] `GET /v1/import-jobs/{job_id}/assets/{asset_id}`
-- [x] `DELETE /v1/import-jobs/{job_id}`
+- [x] `start_import_bundle`
+- [x] `get_import_bundle_status`
+- [x] `get_import_bundle_manifest`
+- [x] `get_import_bundle_asset`
+- [x] `cancel_import_bundle`
 
-## Recommended Request Shape
+## Recommended Import Request Shape
 
-### `POST /v1/tabs/{tab_id}/import-bundle`
+### `start_import_bundle`
 
 ```json
 {
+  "tabId": 1828093415,
   "reload": true,
-  "capture_html": true,
-  "capture_assets": true,
-  "capture_text": true,
-  "capture_screenshot": false,
-  "wait_for_network_idle_ms": 1500,
-  "max_asset_bytes": 25000000,
-  "max_total_bytes": 200000000
+  "captureHtml": true,
+  "captureAssets": true,
+  "captureText": true,
+  "captureScreenshot": false,
+  "waitForNetworkIdleMs": 1500,
+  "maxAssetBytes": 25000000,
+  "maxTotalBytes": 200000000
 }
 ```
 
 ### Initial response
 
-Return a job envelope immediately rather than blocking the HTTP request for the full bundle:
+Return a job envelope immediately rather than blocking the caller for the full bundle:
 
 ```json
 {
-  "ok": true,
-  "job_id": "imp_01JXYZ...",
-  "tab_id": 1828093415,
+  "jobId": "imp_01JXYZ...",
+  "tabId": 1828093415,
   "status": "running"
 }
 ```
@@ -160,8 +156,7 @@ Return a job envelope immediately rather than blocking the HTTP request for the 
 
 ```json
 {
-  "ok": true,
-  "job_id": "imp_01JXYZ...",
+  "jobId": "imp_01JXYZ...",
   "status": "completed",
   "bundle": {
     "tab": {
@@ -170,21 +165,19 @@ Return a job envelope immediately rather than blocking the HTTP request for the 
       "url": "https://example.com/page"
     },
     "document": {
-      "content_type": "text/html",
-      "encoding": "utf-8",
+      "contentType": "text/html",
       "html": "<!doctype html>..."
     },
     "assets": [
       {
-        "asset_id": "asset_001",
+        "assetId": "asset_001",
         "url": "https://example.com/app.css",
-        "resource_type": "Stylesheet",
-        "mime_type": "text/css",
+        "resourceType": "Stylesheet",
+        "mimeType": "text/css",
         "status": 200,
-        "served_from_cache": true,
-        "base64_encoded": false,
-        "bytes": 18342,
-        "body_url": "/v1/import-jobs/imp_01JXYZ/assets/asset_001"
+        "servedFromCache": true,
+        "base64Encoded": false,
+        "bytes": 18342
       }
     ]
   }
@@ -261,65 +254,16 @@ Per recorded request, track:
 
 - [x] normalize asset entries into a stable manifest
 - [x] generate deterministic `asset_id` values
-- [x] include rewritten local body URLs for downstream clients
 - [x] include tab metadata and capture timing metadata
-- [x] store manifest and asset bodies in memory or on disk
+- [x] store manifest and asset bodies in memory inside the extension
+- [ ] add a formal export shape for downstream consumers that need deterministic replay metadata
 
-## `browsr` Server Changes
+## Extension Limits
 
-### New config
-
-- [x] add `import_bundle_timeout_ms`
-- [ ] add `import_bundle_max_asset_bytes`
-- [ ] add `import_bundle_max_total_bytes`
-- [ ] add optional on-disk bundle storage root
-
-### New API models
-
-- [x] request model for `import-bundle`
-- [x] status response model
-- [x] manifest response model
-- [x] asset streaming/download response
-- [x] structured error models for debugger attach failures, timeout, and body truncation
-
-### New server behavior
-
-- [x] start import jobs asynchronously
-- [x] poll/relay extension status
-- [x] allow clients to fetch assets individually
-- [ ] optionally support SSE/WebSocket job progress later
-
-## Bundle Storage Strategy
-
-Choose one:
-
-- [x] memory-backed only for early prototype
-- [ ] disk-backed bundle staging for real usage
-
-Recommended:
-
-- [ ] disk-backed for asset bodies
-- [ ] memory-backed for job metadata and manifest index
-
-Reason:
-
-- [ ] large sites will blow up process memory otherwise
-- [ ] clients may need to fetch assets lazily after capture completes
-
-## HTML Rewriting Strategy
-
-Downstream faithful rendering usually needs rewritten references.
-
-Implement:
-
-- [ ] parse captured HTML
-- [x] rewrite asset URLs that were captured into local `browsr` asset URLs
-- [x] preserve unresolved URLs when the asset body was not captured
-- [ ] record rewrite failures in manifest metadata
-
-Optional future improvement:
-
-- [ ] export a single self-contained HTML bundle when practical
+- [ ] add configurable per-import size budgets through extension config
+- [ ] add cleanup/eviction policies for completed jobs
+- [ ] add optional chunked asset retrieval for very large payloads
+- [ ] add optional screenshot compression controls
 
 ## Failure Modes To Handle Explicitly
 
@@ -334,7 +278,7 @@ Optional future improvement:
 
 ## Error Codes
 
-Recommended extension/server error codes:
+Recommended extension error codes:
 
 - [x] `IMPORT_BUNDLE_ATTACH_FAILED`
 - [x] `IMPORT_BUNDLE_TIMEOUT`
@@ -355,13 +299,6 @@ Recommended extension/server error codes:
 - [ ] verify grouped tabs behave no differently than normal tabs
 - [ ] verify capture completes for pages with many assets
 
-### `browsr` validation
-
-- [ ] verify import jobs survive long-running requests
-- [ ] verify asset streaming works for binary bodies
-- [ ] verify manifest is stable and reproducible
-- [ ] verify snapshot endpoint remains fast and unaffected
-
 ### Manual tests
 
 - [ ] import a simple static page with CSS and images
@@ -370,19 +307,18 @@ Recommended extension/server error codes:
 - [ ] import a grouped tab
 - [ ] import a page with lazy-loaded images
 - [ ] import a page with fonts and external stylesheets
-- [ ] verify downstream client can render from bundle without origin requests
+- [ ] verify a downstream consumer can render from the captured bundle without origin requests
 
 ## Rollout Order
 
 - [x] add debugger permission and attach lifecycle
-- [x] add basic import job endpoint
-- [x] record network events only
+- [x] add basic import job commands
+- [x] record network events
 - [x] fetch asset bodies
 - [x] capture final HTML
-- [x] expose manifest endpoint
-- [x] expose asset body endpoint
-- [ ] add HTML URL rewriting
-- [ ] add persistence and cleanup policies
+- [x] expose manifest and asset retrieval commands
+- [ ] add cleanup policies
+- [ ] add export-oriented replay metadata
 
 ## Recommendation
 
@@ -394,4 +330,4 @@ That means:
 - [x] keep `import-bundle` explicit, debugger-backed, reload-driven, and long-running
 - [x] treat bundle capture as a job, not a single synchronous response
 
-This separation will keep the system reliable and prevent the heavy import path from destabilizing the lightweight tab-inspection API.
+This separation keeps the lightweight tab-inspection path stable while letting the extension support a heavier capture mode when explicitly requested.
