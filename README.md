@@ -53,6 +53,62 @@ Supported commands:
 - `cancel_import_bundle`
 - `set_config`
 
+## Import Bundle
+
+`import-bundle` is the heavy capture path. It is distinct from `snapshot_tab`.
+
+- `snapshot_tab`: fast DOM-oriented HTML/text capture from the live session
+- `start_import_bundle`: debugger-backed capture job that reloads the tab and records loaded assets
+
+Recommended flow:
+
+1. Call `start_import_bundle` with a `tabId`
+2. Poll `get_import_bundle_status` until `status` is `completed`, `failed`, or `cancelled`
+3. Fetch `get_import_bundle_manifest`
+4. Fetch individual assets with `get_import_bundle_asset`
+
+Example `start_import_bundle` args:
+
+```json
+{
+  "tabId": 1828093415,
+  "reload": true,
+  "captureHtml": true,
+  "captureAssets": true,
+  "captureText": true,
+  "captureSelection": true,
+  "captureScreenshot": false,
+  "waitForNetworkIdleMs": 1500,
+  "settleTimeoutMs": 30000,
+  "maxAssetBytes": 5000000,
+  "maxTotalBytes": 75000000
+}
+```
+
+Manifest highlights:
+
+- `bundle.document`: final captured HTML/text/selection
+- `bundle.assets`: stable asset manifest for recorded resources
+- `bundle.export`: replay-oriented metadata
+- `bundle.capture`: timing metadata for the capture session
+
+Asset retrieval:
+
+- `get_import_bundle_asset` accepts `jobId` and `assetId`
+- `assetId: "document"` returns the captured HTML document as an asset
+- `assetId: "screenshot"` returns the captured screenshot when enabled
+- `offset` and `length` can be provided for chunked retrieval of large assets
+
+Options page import settings:
+
+- network idle wait
+- settle timeout
+- max asset bytes
+- max total bytes
+- completed job TTL
+- retained completed job count
+- screenshot format and quality
+
 ## Build
 
 ```bash
@@ -77,3 +133,4 @@ Build output is copied to `dist/xpose`.
 - Snapshot payload size is capped by `maxHtmlBytes` and `maxTextBytes`.
 - `import-bundle` is intentionally heavier than `snapshot`: it attaches `chrome.debugger`, reloads the tab, records network assets, then detaches.
 - Debugger-backed capture may show Chromium debugger UX and will momentarily disturb the target tab because reload is part of the capture model.
+- Completed import jobs are evicted according to the extension config TTL and retention limits.

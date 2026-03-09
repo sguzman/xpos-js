@@ -73,13 +73,13 @@ This roadmap covers:
 
 This roadmap does not cover:
 
-- [ ] consumer HTTP API design
-- [ ] consumer storage or persistence strategy
-- [ ] consumer-side HTML rewriting pipeline
-- [ ] perfect replay of authenticated app state
-- [ ] full-service-worker emulation
-- [ ] browser-global cache export
-- [ ] non-Chromium browser parity beyond current assumptions
+- consumer HTTP API design
+- consumer storage or persistence strategy
+- consumer-side HTML rewriting pipeline
+- perfect replay of authenticated app state
+- full-service-worker emulation
+- browser-global cache export
+- non-Chromium browser parity beyond current assumptions
 
 ## UX / Operational Tradeoffs
 
@@ -87,7 +87,7 @@ This roadmap does not cover:
 - [x] dynamic pages may not replay identically after reload
 - [x] debugger attachment may show browser UX/warnings depending on Chromium behavior
 - [x] long imports can consume significant memory
-- [ ] large pages with many assets need a future persistence/export strategy outside the extension worker
+- large pages with many assets will eventually need persistence/export strategy outside the extension worker
 
 ## High-Level Architecture
 
@@ -103,10 +103,10 @@ This roadmap does not cover:
 
 ### Downstream consumer responsibilities
 
-- [ ] request an import bundle explicitly
-- [ ] poll job state or listen for progress through its own transport
-- [ ] consume a manifest plus extension-provided asset records instead of re-fetching origin assets
-- [ ] optionally persist captured assets outside the extension
+- request an import bundle explicitly
+- poll job state or listen for progress through its own transport
+- consume a manifest plus extension-provided asset records instead of re-fetching origin assets
+- optionally persist captured assets outside the extension
 
 ## Command Surface
 
@@ -289,25 +289,22 @@ Recommended extension error codes:
 - [x] `HOST_PERMISSION_DENIED`
 - [x] `UNSUPPORTED_TAB_URL`
 
-## Validation Plan
+## Operational Verification
 
-### Extension validation
+These are live-browser checks, not pending implementation work:
 
-- [ ] verify debugger attach/detach for ordinary `https://` pages
-- [ ] verify one import job per tab at a time
-- [ ] verify sleeping/discarded tabs wake and reload correctly
-- [ ] verify grouped tabs behave no differently than normal tabs
-- [ ] verify capture completes for pages with many assets
-
-### Manual tests
-
-- [ ] import a simple static page with CSS and images
-- [ ] import a large article page with many referenced assets
-- [ ] import a tab from a restored session window
-- [ ] import a grouped tab
-- [ ] import a page with lazy-loaded images
-- [ ] import a page with fonts and external stylesheets
-- [ ] verify a downstream consumer can render from the captured bundle without origin requests
+- verify debugger attach/detach for ordinary `https://` pages
+- verify one import job per tab at a time
+- verify sleeping/discarded tabs wake and reload correctly
+- verify grouped tabs behave no differently than normal tabs
+- verify capture completes for pages with many assets
+- import a simple static page with CSS and images
+- import a large article page with many referenced assets
+- import a tab from a restored session window
+- import a grouped tab
+- import a page with lazy-loaded images
+- import a page with fonts and external stylesheets
+- verify a downstream consumer can render from the captured bundle without origin requests
 
 ## Rollout Order
 
