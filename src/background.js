@@ -7,7 +7,15 @@ const DEFAULT_CONFIG = Object.freeze({
   maxTextBytes: 500_000,
   includeText: true,
   includeSelection: true,
-  includeHtml: true
+  includeHtml: true,
+  importWaitForNetworkIdleMs: 1500,
+  importSettleTimeoutMs: 30_000,
+  importMaxAssetBytes: 5_000_000,
+  importMaxTotalBytes: 75_000_000,
+  importCompletedJobTtlMs: 15 * 60 * 1000,
+  importMaxCompletedJobs: 10,
+  importScreenshotFormat: "png",
+  importScreenshotQuality: 90
 });
 
 const STORAGE_KEY = "xposeConfig";
@@ -219,19 +227,19 @@ function normalizeImportOptions(args = {}) {
     waitForNetworkIdleMs:
       Number.isInteger(waitForNetworkIdleMs) && waitForNetworkIdleMs >= 250
         ? waitForNetworkIdleMs
-        : IMPORT_BUNDLE_DEFAULTS.waitForNetworkIdleMs,
+        : runtimeConfig.importWaitForNetworkIdleMs,
     settleTimeoutMs:
       Number.isInteger(settleTimeoutMs) && settleTimeoutMs >= 5_000
         ? settleTimeoutMs
-        : IMPORT_BUNDLE_DEFAULTS.settleTimeoutMs,
+        : runtimeConfig.importSettleTimeoutMs,
     maxAssetBytes:
       Number.isInteger(maxAssetBytes) && maxAssetBytes >= 10_000
         ? maxAssetBytes
-        : IMPORT_BUNDLE_DEFAULTS.maxAssetBytes,
+        : runtimeConfig.importMaxAssetBytes,
     maxTotalBytes:
       Number.isInteger(maxTotalBytes) && maxTotalBytes >= 100_000
         ? maxTotalBytes
-        : IMPORT_BUNDLE_DEFAULTS.maxTotalBytes
+        : runtimeConfig.importMaxTotalBytes
   };
 }
 
@@ -304,6 +312,7 @@ function serializeAsset(asset) {
     bytes: asset.bytes,
     headers: asset.headers,
     bodyAvailable: typeof asset.body === "string",
+    errorCode: asset.errorCode || null,
     error: asset.error
   };
 }
@@ -371,6 +380,9 @@ function isHostPermissionError(error) {
 }
 
 function getCommandErrorCode(error) {
+  if (error?.code && typeof error.code === "string") {
+    return error.code;
+  }
   if (isHostPermissionError(error)) {
     return "HOST_PERMISSION_DENIED";
   }
@@ -387,6 +399,9 @@ function getCommandErrorCode(error) {
 }
 
 function getImportErrorCode(error) {
+  if (error?.code && typeof error.code === "string") {
+    return error.code;
+  }
   if (isHostPermissionError(error)) {
     return "HOST_PERMISSION_DENIED";
   }
@@ -408,6 +423,29 @@ function getImportErrorCode(error) {
     return "IMPORT_BUNDLE_RELOAD_FAILED";
   }
   return "COMMAND_FAILED";
+}
+
+function createCodedError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function decodeBase64ToBytes(base64Text) {
+  const binary = atob(String(base64Text || ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function encodeBytesToBase64(bytes) {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 1) {
+    binary += String.fromCharCode(bytes[index]);
+  }
+  return btoa(binary);
 }
 
 async function hasHostPermissionForUrl(url) {
@@ -722,6 +760,35 @@ function finalizeImportSession(session, status, error = null) {
   session.completedAt = nowIso();
 }
 
+function deleteImportSession(session) {
+  importSessions.delete(session.jobId);
+  if (importSessionsByTabId.get(session.tabId) === session.jobId) {
+    importSessionsByTabId.delete(session.tabId);
+  }
+}
+
+function pruneImportSessions() {
+  const now = Date.now();
+  const ttlMs = Math.max(60_000, Number(runtimeConfig.importCompletedJobTtlMs || DEFAULT_CONFIG.importCompletedJobTtlMs));
+  const maxCompleted = Math.max(1, Number(runtimeConfig.importMaxCompletedJobs || DEFAULT_CONFIG.importMaxCompletedJobs));
+  const terminal = Array.from(importSessions.values()).filter((session) => ["completed", "failed", "cancelled"].includes(session.status));
+
+  for (const session of terminal) {
+    const completedAtMs = session.completedAt ? Date.parse(session.completedAt) : 0;
+    if (completedAtMs && now - completedAtMs > ttlMs) {
+      deleteImportSession(session);
+    }
+  }
+
+  const remainingTerminal = Array.from(importSessions.values())
+    .filter((session) => ["completed", "failed", "cancelled"].includes(session.status))
+    .sort((left, right) => Date.parse(right.completedAt || 0) - Date.parse(left.completedAt || 0));
+
+  for (const session of remainingTerminal.slice(maxCompleted)) {
+    deleteImportSession(session);
+  }
+}
+
 function ensureImportDebuggerListenersRegistered() {
   if (debuggerListenersRegistered) {
     return;
@@ -797,6 +864,7 @@ function ensureImportDebuggerListenersRegistered() {
       const requestId = String(params.requestId || "");
       const existing = session.requests.get(requestId) || { requestId };
       existing.failed = true;
+      existing.errorCode = "IMPORT_BUNDLE_BODY_UNAVAILABLE";
       existing.error = params.errorText || "loading failed";
       session.requests.set(requestId, existing);
       session.inflightRequests.delete(requestId);
@@ -818,6 +886,7 @@ function ensureImportDebuggerListenersRegistered() {
       }
 
       if (session.totalAssetBytes >= session.options.maxTotalBytes) {
+        existing.errorCode = "IMPORT_BUNDLE_SIZE_LIMIT_EXCEEDED";
         existing.error = "max total asset bytes exceeded";
         session.requests.set(requestId, existing);
         return;
@@ -828,11 +897,13 @@ function ensureImportDebuggerListenersRegistered() {
         const text = String(body?.body || "");
         const bytes = new TextEncoder().encode(text).length;
         if (bytes > session.options.maxAssetBytes) {
+          existing.errorCode = "IMPORT_BUNDLE_SIZE_LIMIT_EXCEEDED";
           existing.error = `asset exceeds maxAssetBytes (${session.options.maxAssetBytes})`;
           session.requests.set(requestId, existing);
           return;
         }
         if (session.totalAssetBytes + bytes > session.options.maxTotalBytes) {
+          existing.errorCode = "IMPORT_BUNDLE_SIZE_LIMIT_EXCEEDED";
           existing.error = `asset exceeds remaining total budget (${session.options.maxTotalBytes})`;
           session.requests.set(requestId, existing);
           return;
@@ -861,6 +932,7 @@ function ensureImportDebuggerListenersRegistered() {
         session.assetsById.set(assetId, asset);
         session.totalAssetBytes += bytes;
       } catch (error) {
+        existing.errorCode = "IMPORT_BUNDLE_BODY_UNAVAILABLE";
         existing.error = String(error?.message || error);
         session.requests.set(requestId, existing);
       }
@@ -931,15 +1003,19 @@ async function waitForImportNetworkIdle(session) {
 
 async function captureImportScreenshot(session) {
   const tab = await chrome.tabs.get(session.tabId);
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  const format = runtimeConfig.importScreenshotFormat === "jpeg" ? "jpeg" : "png";
+  const quality = Math.max(1, Math.min(100, Number(runtimeConfig.importScreenshotQuality || DEFAULT_CONFIG.importScreenshotQuality)));
+  const options = format === "jpeg" ? { format, quality } : { format };
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, options);
   return {
-    contentType: "image/png",
+    contentType: format === "jpeg" ? "image/jpeg" : "image/png",
     dataUrl
   };
 }
 
 async function runImportBundleCapture(session) {
   const traceId = nextTraceId("import");
+  pruneImportSessions();
   markImportSessionUpdated(session, "attaching");
   session.startedAt = nowIso();
   log("info", "import.start", { jobId: session.jobId, tabId: session.tabId, options: session.options }, traceId);
@@ -980,6 +1056,7 @@ async function runImportBundleCapture(session) {
     }
 
     finalizeImportSession(session, "completed");
+    pruneImportSessions();
     log(
       "info",
       "import.completed",
@@ -996,6 +1073,7 @@ async function runImportBundleCapture(session) {
       code: getImportErrorCode(error),
       message: String(error?.message || error)
     });
+    pruneImportSessions();
     log("error", "import.failed", { jobId: session.jobId, tabId: session.tabId, error: String(error) }, traceId);
   } finally {
     await detachImportDebugger(session);
@@ -1005,6 +1083,7 @@ async function runImportBundleCapture(session) {
 }
 
 async function startImportBundle(args = {}) {
+  pruneImportSessions();
   const tabId = Number(pickArg(args, "tabId", "tab_id"));
   if (!Number.isInteger(tabId)) {
     throw new Error("start_import_bundle requires numeric tabId");
@@ -1023,6 +1102,7 @@ async function startImportBundle(args = {}) {
 }
 
 async function getImportBundleStatus(args = {}) {
+  pruneImportSessions();
   const jobId = String(pickArg(args, "jobId", "job_id") || "");
   const session = importSessions.get(jobId);
   if (!session) {
@@ -1032,6 +1112,7 @@ async function getImportBundleStatus(args = {}) {
 }
 
 async function getImportBundleManifest(args = {}) {
+  pruneImportSessions();
   const jobId = String(pickArg(args, "jobId", "job_id") || "");
   const session = importSessions.get(jobId);
   if (!session) {
@@ -1076,21 +1157,52 @@ async function getImportBundleManifest(args = {}) {
       },
       screenshot: session.screenshot
         ? {
+            assetId: "screenshot",
             contentType: session.screenshot.contentType,
             available: true
           }
         : null,
-      assets
+      assets,
+      export: {
+        version: 1,
+        documentAssetId: "document",
+        screenshotAssetId: session.screenshot ? "screenshot" : null,
+        assetCount: assets.length,
+        textAvailable: Boolean(session.finalSnapshot?.text),
+        selectionAvailable: Boolean(session.finalSnapshot?.selection)
+      }
     }
   };
 }
 
 async function getImportBundleAsset(args = {}) {
+  pruneImportSessions();
   const jobId = String(pickArg(args, "jobId", "job_id") || "");
   const assetId = String(pickArg(args, "assetId", "asset_id") || "");
+  const offset = Math.max(0, Number(pickArg(args, "offset", "offset")) || 0);
+  const requestedLength = Number(pickArg(args, "length", "length"));
   const session = importSessions.get(jobId);
   if (!session) {
     throw new Error(`Unknown import bundle job: ${jobId}`);
+  }
+
+  if (assetId === "document" && session.finalSnapshot?.html) {
+    const bytes = new TextEncoder().encode(session.finalSnapshot.html);
+    const chunkLength = Number.isInteger(requestedLength) && requestedLength > 0 ? requestedLength : bytes.length - offset;
+    const chunk = bytes.slice(offset, offset + Math.max(0, chunkLength));
+    return {
+      jobId,
+      assetId,
+      contentType: "text/html",
+      base64Encoded: offset > 0 || chunk.length !== bytes.length,
+      body: offset > 0 || chunk.length !== bytes.length ? encodeBytesToBase64(chunk) : session.finalSnapshot.html,
+      chunk: {
+        offset,
+        length: chunk.length,
+        totalBytes: bytes.length,
+        complete: offset + chunk.length >= bytes.length
+      }
+    };
   }
 
   if (assetId === "screenshot" && session.screenshot) {
@@ -1107,17 +1219,33 @@ async function getImportBundleAsset(args = {}) {
   if (!asset) {
     throw new Error(`Unknown import bundle asset: ${assetId}`);
   }
+  if (typeof asset.body !== "string") {
+    throw createCodedError(asset.errorCode || "IMPORT_BUNDLE_BODY_UNAVAILABLE", asset.error || `Asset body unavailable for ${assetId}`);
+  }
+
+  const fullBytes = asset.base64Encoded ? decodeBase64ToBytes(asset.body) : new TextEncoder().encode(asset.body);
+  const chunkLength =
+    Number.isInteger(requestedLength) && requestedLength > 0 ? requestedLength : Math.max(0, fullBytes.length - offset);
+  const chunkBytes = fullBytes.slice(offset, offset + Math.max(0, chunkLength));
+  const isChunked = offset > 0 || chunkBytes.length !== fullBytes.length;
 
   return {
     jobId,
     asset: serializeAsset(asset),
     contentType: asset.mimeType || "application/octet-stream",
-    base64Encoded: asset.base64Encoded,
-    body: asset.body
+    base64Encoded: isChunked ? true : asset.base64Encoded,
+    body: isChunked ? encodeBytesToBase64(chunkBytes) : asset.body,
+    chunk: {
+      offset,
+      length: chunkBytes.length,
+      totalBytes: fullBytes.length,
+      complete: offset + chunkBytes.length >= fullBytes.length
+    }
   };
 }
 
 async function cancelImportBundle(args = {}) {
+  pruneImportSessions();
   const jobId = String(pickArg(args, "jobId", "job_id") || "");
   const session = importSessions.get(jobId);
   if (!session) {
@@ -1129,7 +1257,7 @@ async function cancelImportBundle(args = {}) {
     message: "Import bundle cancelled by caller"
   });
   await detachImportDebugger(session);
-  importSessionsByTabId.delete(session.tabId);
+  pruneImportSessions();
   return summarizeImportSession(session);
 }
 
@@ -1494,6 +1622,38 @@ async function handleCommand(message) {
       if (Number.isInteger(maxTextBytes) && maxTextBytes > 1_000) {
         next.maxTextBytes = maxTextBytes;
       }
+      const importWaitForNetworkIdleMs = Number(pickArg(args, "importWaitForNetworkIdleMs", "import_wait_for_network_idle_ms"));
+      if (Number.isInteger(importWaitForNetworkIdleMs) && importWaitForNetworkIdleMs >= 250) {
+        next.importWaitForNetworkIdleMs = importWaitForNetworkIdleMs;
+      }
+      const importSettleTimeoutMs = Number(pickArg(args, "importSettleTimeoutMs", "import_settle_timeout_ms"));
+      if (Number.isInteger(importSettleTimeoutMs) && importSettleTimeoutMs >= 5_000) {
+        next.importSettleTimeoutMs = importSettleTimeoutMs;
+      }
+      const importMaxAssetBytes = Number(pickArg(args, "importMaxAssetBytes", "import_max_asset_bytes"));
+      if (Number.isInteger(importMaxAssetBytes) && importMaxAssetBytes >= 10_000) {
+        next.importMaxAssetBytes = importMaxAssetBytes;
+      }
+      const importMaxTotalBytes = Number(pickArg(args, "importMaxTotalBytes", "import_max_total_bytes"));
+      if (Number.isInteger(importMaxTotalBytes) && importMaxTotalBytes >= 100_000) {
+        next.importMaxTotalBytes = importMaxTotalBytes;
+      }
+      const importCompletedJobTtlMs = Number(pickArg(args, "importCompletedJobTtlMs", "import_completed_job_ttl_ms"));
+      if (Number.isInteger(importCompletedJobTtlMs) && importCompletedJobTtlMs >= 60_000) {
+        next.importCompletedJobTtlMs = importCompletedJobTtlMs;
+      }
+      const importMaxCompletedJobs = Number(pickArg(args, "importMaxCompletedJobs", "import_max_completed_jobs"));
+      if (Number.isInteger(importMaxCompletedJobs) && importMaxCompletedJobs >= 1) {
+        next.importMaxCompletedJobs = importMaxCompletedJobs;
+      }
+      const importScreenshotFormat = String(pickArg(args, "importScreenshotFormat", "import_screenshot_format") || "");
+      if (["png", "jpeg"].includes(importScreenshotFormat)) {
+        next.importScreenshotFormat = importScreenshotFormat;
+      }
+      const importScreenshotQuality = Number(pickArg(args, "importScreenshotQuality", "import_screenshot_quality"));
+      if (Number.isInteger(importScreenshotQuality) && importScreenshotQuality >= 1 && importScreenshotQuality <= 100) {
+        next.importScreenshotQuality = importScreenshotQuality;
+      }
       if (Object.hasOwn(args, "includeHtml") || Object.hasOwn(args, "include_html")) {
         next.includeHtml = Boolean(pickArg(args, "includeHtml", "include_html"));
       }
@@ -1505,6 +1665,7 @@ async function handleCommand(message) {
       }
 
       await saveConfig(next);
+      pruneImportSessions();
       result = { config: runtimeConfig };
       if (next.endpoint || next.reconnectMs) {
         if (socket) {
@@ -1712,12 +1873,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           reconnectMs: Number(message.config.reconnectMs),
           maxHtmlBytes: Number(message.config.maxHtmlBytes),
           maxTextBytes: Number(message.config.maxTextBytes),
+          importWaitForNetworkIdleMs: Number(message.config.importWaitForNetworkIdleMs),
+          importSettleTimeoutMs: Number(message.config.importSettleTimeoutMs),
+          importMaxAssetBytes: Number(message.config.importMaxAssetBytes),
+          importMaxTotalBytes: Number(message.config.importMaxTotalBytes),
+          importCompletedJobTtlMs: Number(message.config.importCompletedJobTtlMs),
+          importMaxCompletedJobs: Number(message.config.importMaxCompletedJobs),
+          importScreenshotFormat: String(message.config.importScreenshotFormat || "png"),
+          importScreenshotQuality: Number(message.config.importScreenshotQuality),
           includeHtml: Boolean(message.config.includeHtml),
           includeText: Boolean(message.config.includeText),
           includeSelection: Boolean(message.config.includeSelection)
         };
 
         await saveConfig(next);
+        pruneImportSessions();
         if (socket) {
           socket.close();
         }

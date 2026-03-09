@@ -32,6 +32,49 @@
           <input id="maxTextBytes" name="maxTextBytes" type="number" min="1000" step="1000" required />
         </label>
 
+        <label>
+          Import network idle wait (ms)
+          <input id="importWaitForNetworkIdleMs" name="importWaitForNetworkIdleMs" type="number" min="250" step="250" required />
+        </label>
+
+        <label>
+          Import settle timeout (ms)
+          <input id="importSettleTimeoutMs" name="importSettleTimeoutMs" type="number" min="5000" step="1000" required />
+        </label>
+
+        <label>
+          Import max asset bytes
+          <input id="importMaxAssetBytes" name="importMaxAssetBytes" type="number" min="10000" step="10000" required />
+        </label>
+
+        <label>
+          Import max total bytes
+          <input id="importMaxTotalBytes" name="importMaxTotalBytes" type="number" min="100000" step="100000" required />
+        </label>
+
+        <label>
+          Completed job TTL (ms)
+          <input id="importCompletedJobTtlMs" name="importCompletedJobTtlMs" type="number" min="60000" step="60000" required />
+        </label>
+
+        <label>
+          Completed jobs to retain
+          <input id="importMaxCompletedJobs" name="importMaxCompletedJobs" type="number" min="1" step="1" required />
+        </label>
+
+        <label>
+          Screenshot format
+          <select id="importScreenshotFormat" name="importScreenshotFormat">
+            <option value="png">png</option>
+            <option value="jpeg">jpeg</option>
+          </select>
+        </label>
+
+        <label>
+          Screenshot quality
+          <input id="importScreenshotQuality" name="importScreenshotQuality" type="number" min="1" max="100" step="1" required />
+        </label>
+
         <label class="row">
           <input id="includeHtml" name="includeHtml" type="checkbox" />
           Include HTML in snapshots

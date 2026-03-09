@@ -256,14 +256,14 @@ Per recorded request, track:
 - [x] generate deterministic `asset_id` values
 - [x] include tab metadata and capture timing metadata
 - [x] store manifest and asset bodies in memory inside the extension
-- [ ] add a formal export shape for downstream consumers that need deterministic replay metadata
+- [x] add a formal export shape for downstream consumers that need deterministic replay metadata
 
 ## Extension Limits
 
-- [ ] add configurable per-import size budgets through extension config
-- [ ] add cleanup/eviction policies for completed jobs
-- [ ] add optional chunked asset retrieval for very large payloads
-- [ ] add optional screenshot compression controls
+- [x] add configurable per-import size budgets through extension config
+- [x] add cleanup/eviction policies for completed jobs
+- [x] add optional chunked asset retrieval for very large payloads
+- [x] add optional screenshot compression controls
 
 ## Failure Modes To Handle Explicitly
 
@@ -284,8 +284,8 @@ Recommended extension error codes:
 - [x] `IMPORT_BUNDLE_TIMEOUT`
 - [x] `IMPORT_BUNDLE_CANCELLED`
 - [x] `IMPORT_BUNDLE_RELOAD_FAILED`
-- [ ] `IMPORT_BUNDLE_BODY_UNAVAILABLE`
-- [ ] `IMPORT_BUNDLE_SIZE_LIMIT_EXCEEDED`
+- [x] `IMPORT_BUNDLE_BODY_UNAVAILABLE`
+- [x] `IMPORT_BUNDLE_SIZE_LIMIT_EXCEEDED`
 - [x] `HOST_PERMISSION_DENIED`
 - [x] `UNSUPPORTED_TAB_URL`
 
@@ -317,8 +317,8 @@ Recommended extension error codes:
 - [x] fetch asset bodies
 - [x] capture final HTML
 - [x] expose manifest and asset retrieval commands
-- [ ] add cleanup policies
-- [ ] add export-oriented replay metadata
+- [x] add cleanup policies
+- [x] add export-oriented replay metadata
 
 ## Recommendation
 

@@ -40,11 +40,13 @@ label {
 }
 
 input[type="url"],
-input[type="number"] {
+input[type="number"],
+select {
   border: 1px solid #c4ccd5;
   border-radius: 8px;
   padding: 10px;
   font-size: 14px;
+  background: #fff;
 }
 
 .row {

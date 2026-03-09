@@ -17,6 +17,14 @@ function setForm(config) {
   form.reconnectMs.value = String(config.reconnectMs);
   form.maxHtmlBytes.value = String(config.maxHtmlBytes);
   form.maxTextBytes.value = String(config.maxTextBytes);
+  form.importWaitForNetworkIdleMs.value = String(config.importWaitForNetworkIdleMs);
+  form.importSettleTimeoutMs.value = String(config.importSettleTimeoutMs);
+  form.importMaxAssetBytes.value = String(config.importMaxAssetBytes);
+  form.importMaxTotalBytes.value = String(config.importMaxTotalBytes);
+  form.importCompletedJobTtlMs.value = String(config.importCompletedJobTtlMs);
+  form.importMaxCompletedJobs.value = String(config.importMaxCompletedJobs);
+  form.importScreenshotFormat.value = String(config.importScreenshotFormat);
+  form.importScreenshotQuality.value = String(config.importScreenshotQuality);
   form.includeHtml.checked = Boolean(config.includeHtml);
   form.includeText.checked = Boolean(config.includeText);
   form.includeSelection.checked = Boolean(config.includeSelection);
@@ -28,6 +36,14 @@ function getForm() {
     reconnectMs: Number(form.reconnectMs.value),
     maxHtmlBytes: Number(form.maxHtmlBytes.value),
     maxTextBytes: Number(form.maxTextBytes.value),
+    importWaitForNetworkIdleMs: Number(form.importWaitForNetworkIdleMs.value),
+    importSettleTimeoutMs: Number(form.importSettleTimeoutMs.value),
+    importMaxAssetBytes: Number(form.importMaxAssetBytes.value),
+    importMaxTotalBytes: Number(form.importMaxTotalBytes.value),
+    importCompletedJobTtlMs: Number(form.importCompletedJobTtlMs.value),
+    importMaxCompletedJobs: Number(form.importMaxCompletedJobs.value),
+    importScreenshotFormat: form.importScreenshotFormat.value,
+    importScreenshotQuality: Number(form.importScreenshotQuality.value),
     includeHtml: form.includeHtml.checked,
     includeText: form.includeText.checked,
     includeSelection: form.includeSelection.checked
