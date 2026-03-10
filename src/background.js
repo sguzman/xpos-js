@@ -258,6 +258,7 @@ function makeImportSession(tabId, options) {
     loadEventFiredAt: null,
     lastNetworkActivityAt: Date.now(),
     inflightRequests: new Set(),
+    inflightBlockingRequests: new Set(),
     requests: new Map(),
     assetsById: new Map(),
     requestToAssetId: new Map(),
@@ -289,6 +290,7 @@ function summarizeImportSession(session) {
     stats: {
       requestsObserved: session.requests.size,
       inflightRequests: session.inflightRequests.size,
+      inflightBlockingRequests: session.inflightBlockingRequests.size,
       assetsCaptured: session.assetsById.size,
       totalAssetBytes: session.totalAssetBytes
     }
@@ -737,6 +739,11 @@ function shouldCaptureAssetFromRequest(request) {
   return request.resourceType !== "WebSocket";
 }
 
+function shouldBlockImportCompletion(request) {
+  const blockingTypes = new Set(["Document", "Stylesheet", "Script", "Image", "Font", "Media", "Manifest"]);
+  return blockingTypes.has(request?.resourceType || "Other");
+}
+
 async function sendDebuggerCommand(tabId, method, params = {}) {
   return chrome.debugger.sendCommand({ tabId }, method, params);
 }
@@ -828,6 +835,9 @@ function ensureImportDebuggerListenersRegistered() {
       }
       session.requests.set(requestId, next);
       session.inflightRequests.add(requestId);
+      if (shouldBlockImportCompletion(next)) {
+        session.inflightBlockingRequests.add(requestId);
+      }
       markImportSessionUpdated(session);
       return;
     }
@@ -868,6 +878,7 @@ function ensureImportDebuggerListenersRegistered() {
       existing.error = params.errorText || "loading failed";
       session.requests.set(requestId, existing);
       session.inflightRequests.delete(requestId);
+      session.inflightBlockingRequests.delete(requestId);
       markImportSessionUpdated(session);
       return;
     }
@@ -879,6 +890,7 @@ function ensureImportDebuggerListenersRegistered() {
       existing.encodedDataLength = params.encodedDataLength || 0;
       session.requests.set(requestId, existing);
       session.inflightRequests.delete(requestId);
+      session.inflightBlockingRequests.delete(requestId);
       markImportSessionUpdated(session);
 
       if (!session.options.captureAssets || !shouldCaptureAssetFromRequest(existing)) {
@@ -985,14 +997,33 @@ async function detachImportDebugger(session) {
 
 async function waitForImportNetworkIdle(session) {
   const deadline = Date.now() + session.options.settleTimeoutMs;
+  let lastLoggedState = "";
   while (Date.now() < deadline) {
     if (session.status === "cancelled") {
       throw new Error("Import bundle cancelled");
     }
 
     const idleForMs = Date.now() - session.lastNetworkActivityAt;
-    if (session.loadEventFiredAt && session.inflightRequests.size === 0 && idleForMs >= session.options.waitForNetworkIdleMs) {
+    if (
+      session.loadEventFiredAt &&
+      session.inflightBlockingRequests.size === 0 &&
+      idleForMs >= session.options.waitForNetworkIdleMs
+    ) {
       return;
+    }
+
+    const stateLabel = `${Boolean(session.loadEventFiredAt)}:${session.inflightBlockingRequests.size}:${session.inflightRequests.size}`;
+    if (stateLabel !== lastLoggedState) {
+      lastLoggedState = stateLabel;
+      log("info", "import.network_idle.wait", {
+        jobId: session.jobId,
+        tabId: session.tabId,
+        loadEventFired: Boolean(session.loadEventFiredAt),
+        inflightBlockingRequests: session.inflightBlockingRequests.size,
+        inflightRequests: session.inflightRequests.size,
+        idleForMs,
+        waitForNetworkIdleMs: session.options.waitForNetworkIdleMs
+      });
     }
 
     await sleep(150);
