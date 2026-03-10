@@ -44,6 +44,7 @@ const SNAPSHOT_RETRY_TEXT_TIMEOUT_MS = 6000;
 const SNAPSHOT_WAKE_DELAY_MS = 250;
 const TAB_READY_TIMEOUT_MS = 2000;
 const TAB_WAKE_READY_TIMEOUT_MS = 4000;
+const IMPORT_BLOCKING_REQUEST_STALE_MS = 10_000;
 
 let runtimeConfig = { ...DEFAULT_CONFIG };
 let socket = null;
@@ -257,6 +258,7 @@ function makeImportSession(tabId, options) {
     attached: false,
     loadEventFiredAt: null,
     lastNetworkActivityAt: Date.now(),
+    lastBlockingActivityAt: Date.now(),
     inflightRequests: new Set(),
     inflightBlockingRequests: new Set(),
     requests: new Map(),
@@ -744,6 +746,24 @@ function shouldBlockImportCompletion(request) {
   return blockingTypes.has(request?.resourceType || "Other");
 }
 
+function getEffectiveInflightBlockingRequests(session) {
+  if (!session.loadEventFiredAt) {
+    return Array.from(session.inflightBlockingRequests.values());
+  }
+
+  const now = Date.now();
+  const active = [];
+  for (const requestId of session.inflightBlockingRequests.values()) {
+    const request = session.requests.get(requestId);
+    const startedAtMs = Number(request?.startedAtMs || 0);
+    if (startedAtMs && now - startedAtMs > IMPORT_BLOCKING_REQUEST_STALE_MS) {
+      continue;
+    }
+    active.push(requestId);
+  }
+  return active;
+}
+
 async function sendDebuggerCommand(tabId, method, params = {}) {
   return chrome.debugger.sendCommand({ tabId }, method, params);
 }
@@ -820,6 +840,7 @@ function ensureImportDebuggerListenersRegistered() {
       const next = {
         ...existing,
         requestId,
+        startedAtMs: existing.startedAtMs || Date.now(),
         url: params.request?.url || existing.url || "",
         documentURL: params.documentURL || existing.documentURL || "",
         resourceType: params.type || existing.resourceType || "Other",
@@ -837,6 +858,7 @@ function ensureImportDebuggerListenersRegistered() {
       session.inflightRequests.add(requestId);
       if (shouldBlockImportCompletion(next)) {
         session.inflightBlockingRequests.add(requestId);
+        session.lastBlockingActivityAt = Date.now();
       }
       markImportSessionUpdated(session);
       return;
@@ -878,7 +900,9 @@ function ensureImportDebuggerListenersRegistered() {
       existing.error = params.errorText || "loading failed";
       session.requests.set(requestId, existing);
       session.inflightRequests.delete(requestId);
-      session.inflightBlockingRequests.delete(requestId);
+      if (session.inflightBlockingRequests.delete(requestId)) {
+        session.lastBlockingActivityAt = Date.now();
+      }
       markImportSessionUpdated(session);
       return;
     }
@@ -890,7 +914,9 @@ function ensureImportDebuggerListenersRegistered() {
       existing.encodedDataLength = params.encodedDataLength || 0;
       session.requests.set(requestId, existing);
       session.inflightRequests.delete(requestId);
-      session.inflightBlockingRequests.delete(requestId);
+      if (session.inflightBlockingRequests.delete(requestId)) {
+        session.lastBlockingActivityAt = Date.now();
+      }
       markImportSessionUpdated(session);
 
       if (!session.options.captureAssets || !shouldCaptureAssetFromRequest(existing)) {
@@ -1004,15 +1030,17 @@ async function waitForImportNetworkIdle(session) {
     }
 
     const idleForMs = Date.now() - session.lastNetworkActivityAt;
+    const blockingIdleForMs = Date.now() - session.lastBlockingActivityAt;
+    const effectiveInflightBlockingRequests = getEffectiveInflightBlockingRequests(session);
     if (
       session.loadEventFiredAt &&
-      session.inflightBlockingRequests.size === 0 &&
-      idleForMs >= session.options.waitForNetworkIdleMs
+      effectiveInflightBlockingRequests.length === 0 &&
+      blockingIdleForMs >= session.options.waitForNetworkIdleMs
     ) {
       return;
     }
 
-    const stateLabel = `${Boolean(session.loadEventFiredAt)}:${session.inflightBlockingRequests.size}:${session.inflightRequests.size}`;
+    const stateLabel = `${Boolean(session.loadEventFiredAt)}:${effectiveInflightBlockingRequests.length}:${session.inflightRequests.size}`;
     if (stateLabel !== lastLoggedState) {
       lastLoggedState = stateLabel;
       log("info", "import.network_idle.wait", {
@@ -1020,8 +1048,10 @@ async function waitForImportNetworkIdle(session) {
         tabId: session.tabId,
         loadEventFired: Boolean(session.loadEventFiredAt),
         inflightBlockingRequests: session.inflightBlockingRequests.size,
+        effectiveInflightBlockingRequests: effectiveInflightBlockingRequests.length,
         inflightRequests: session.inflightRequests.size,
         idleForMs,
+        blockingIdleForMs,
         waitForNetworkIdleMs: session.options.waitForNetworkIdleMs
       });
     }
