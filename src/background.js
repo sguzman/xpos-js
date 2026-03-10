@@ -317,6 +317,7 @@ function serializeAsset(asset) {
     headers: asset.headers,
     bodyAvailable: typeof asset.body === "string",
     errorCode: asset.errorCode || null,
+    discoveredBy: asset.discoveredBy || "network",
     error: asset.error
   };
 }
@@ -773,6 +774,15 @@ function getImportSessionByTabId(tabId) {
   return jobId ? importSessions.get(jobId) : null;
 }
 
+function findImportAssetByUrl(session, url) {
+  for (const asset of session.assetsById.values()) {
+    if (asset.url === url) {
+      return asset;
+    }
+  }
+  return null;
+}
+
 function markImportSessionUpdated(session, status) {
   session.updatedAt = nowIso();
   if (status) {
@@ -1074,6 +1084,209 @@ async function captureImportScreenshot(session) {
   };
 }
 
+async function collectImportReferencedAssets(tabId) {
+  function collectReferencedAssetsInPage() {
+    function normalizeUrl(raw) {
+      try {
+        return new URL(String(raw || ""), location.href).toString();
+      } catch (_error) {
+        return "";
+      }
+    }
+
+    function parseSrcset(raw) {
+      const value = String(raw || "").trim();
+      if (!value) {
+        return [];
+      }
+      const candidates = [];
+      let current = "";
+      let inUrl = true;
+      let parenDepth = 0;
+      for (let index = 0; index < value.length; index += 1) {
+        const char = value[index];
+        if (char === "(") {
+          parenDepth += 1;
+        } else if (char === ")" && parenDepth > 0) {
+          parenDepth -= 1;
+        }
+
+        if (char === "," && parenDepth === 0) {
+          const nextSlice = value.slice(index + 1);
+          const commaBelongsToUrl = inUrl && /^\s*[A-Za-z0-9_-]+\s*(?:[wx]|$)/.test(nextSlice);
+          if (!commaBelongsToUrl) {
+            if (current.trim()) {
+              candidates.push(current.trim());
+            }
+            current = "";
+            inUrl = true;
+            continue;
+          }
+        }
+
+        if (/\s/.test(char) && inUrl && current.trim()) {
+          inUrl = false;
+        }
+        current += char;
+      }
+      if (current.trim()) {
+        candidates.push(current.trim());
+      }
+
+      return candidates
+        .map((candidate) => candidate.trim().split(/\s+/, 1)[0])
+        .map(normalizeUrl)
+        .filter(Boolean);
+    }
+
+    const refs = [];
+    const pushRef = (url, kind, source) => {
+      const normalized = normalizeUrl(url);
+      if (!/^https?:/i.test(normalized)) {
+        return;
+      }
+      refs.push({ url: normalized, kind, source });
+    };
+
+    for (const node of document.querySelectorAll("img")) {
+      pushRef(node.currentSrc || node.getAttribute("src"), "Image", "img.src");
+      for (const url of parseSrcset(node.getAttribute("srcset"))) {
+        pushRef(url, "Image", "img.srcset");
+      }
+    }
+    for (const node of document.querySelectorAll("source")) {
+      pushRef(node.getAttribute("src"), "Media", "source.src");
+      for (const url of parseSrcset(node.getAttribute("srcset"))) {
+        pushRef(url, "Image", "source.srcset");
+      }
+    }
+    for (const node of document.querySelectorAll("link[rel='stylesheet'], link[rel='preload'], link[rel='icon'], link[rel='apple-touch-icon']")) {
+      pushRef(node.getAttribute("href"), "Stylesheet", "link.href");
+    }
+    for (const node of document.querySelectorAll("script[src]")) {
+      pushRef(node.getAttribute("src"), "Script", "script.src");
+    }
+    for (const node of document.querySelectorAll("video[poster], audio[src], video[src]")) {
+      pushRef(node.getAttribute("poster"), "Image", "media.poster");
+      pushRef(node.getAttribute("src"), "Media", "media.src");
+    }
+
+    const deduped = new Map();
+    for (const ref of refs) {
+      if (!deduped.has(ref.url)) {
+        deduped.set(ref.url, ref);
+      }
+    }
+    return Array.from(deduped.values());
+  }
+
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    injectImmediately: true,
+    func: collectReferencedAssetsInPage
+  });
+
+  return Array.isArray(result?.result) ? result.result : [];
+}
+
+async function fetchReferencedImportAsset(session, ref, traceId) {
+  if (findImportAssetByUrl(session, ref.url)) {
+    return;
+  }
+
+  const response = await fetch(ref.url, { credentials: "include" });
+  if (!response.ok) {
+    throw createCodedError("IMPORT_BUNDLE_BODY_UNAVAILABLE", `fetch failed with status ${response.status}`);
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length > session.options.maxAssetBytes) {
+    throw createCodedError("IMPORT_BUNDLE_SIZE_LIMIT_EXCEEDED", `asset exceeds maxAssetBytes (${session.options.maxAssetBytes})`);
+  }
+  if (session.totalAssetBytes + bytes.length > session.options.maxTotalBytes) {
+    throw createCodedError("IMPORT_BUNDLE_SIZE_LIMIT_EXCEEDED", `asset exceeds remaining total budget (${session.options.maxTotalBytes})`);
+  }
+
+  const assetId = createDeterministicAssetId({
+    url: ref.url,
+    documentURL: session.finalSnapshot?.url || "",
+    resourceType: ref.kind || "Other",
+    frameId: "ref",
+    assetOrdinal: 1
+  });
+  session.assetsById.set(assetId, {
+    assetId,
+    requestId: `ref:${hashText(ref.url)}`,
+    url: ref.url,
+    documentURL: session.finalSnapshot?.url || "",
+    resourceType: ref.kind || "Other",
+    mimeType: response.headers.get("content-type") || "application/octet-stream",
+    status: response.status,
+    assetOrdinal: 1,
+    servedFromCache: false,
+    fromDiskCache: false,
+    fromServiceWorker: false,
+    headers: Object.fromEntries(response.headers.entries()),
+    base64Encoded: true,
+    body: encodeBytesToBase64(bytes),
+    bytes: bytes.length,
+    discoveredBy: ref.source || "dom-reference",
+    error: null
+  });
+  session.totalAssetBytes += bytes.length;
+  log("info", "import.reference_asset.captured", { jobId: session.jobId, tabId: session.tabId, url: ref.url, bytes: bytes.length }, traceId);
+}
+
+async function captureReferencedImportAssets(session, traceId) {
+  const refs = await collectImportReferencedAssets(session.tabId);
+  let captured = 0;
+  let skipped = 0;
+  for (const ref of refs) {
+    if (findImportAssetByUrl(session, ref.url)) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      await fetchReferencedImportAsset(session, ref, traceId);
+      captured += 1;
+    } catch (error) {
+      skipped += 1;
+      if (!findImportAssetByUrl(session, ref.url)) {
+        const assetId = createDeterministicAssetId({
+          url: ref.url,
+          documentURL: session.finalSnapshot?.url || "",
+          resourceType: ref.kind || "Other",
+          frameId: "ref",
+          assetOrdinal: 1
+        });
+        session.assetsById.set(assetId, {
+          assetId,
+          requestId: `ref:${hashText(ref.url)}`,
+          url: ref.url,
+          documentURL: session.finalSnapshot?.url || "",
+          resourceType: ref.kind || "Other",
+          mimeType: "application/octet-stream",
+          status: null,
+          assetOrdinal: 1,
+          servedFromCache: false,
+          fromDiskCache: false,
+          fromServiceWorker: false,
+          headers: {},
+          base64Encoded: false,
+          body: null,
+          bytes: 0,
+          discoveredBy: ref.source || "dom-reference",
+          errorCode: getImportErrorCode(error),
+          error: String(error?.message || error)
+        });
+      }
+      log("warn", "import.reference_asset.failed", { jobId: session.jobId, tabId: session.tabId, url: ref.url, error: String(error) }, traceId);
+    }
+  }
+  log("info", "import.reference_asset.summary", { jobId: session.jobId, tabId: session.tabId, referenced: refs.length, captured, skipped }, traceId);
+}
+
 async function runImportBundleCapture(session) {
   const traceId = nextTraceId("import");
   pruneImportSessions();
@@ -1107,6 +1320,14 @@ async function runImportBundleCapture(session) {
       includeText: session.options.captureText,
       includeSelection: session.options.captureSelection
     });
+
+    if (session.options.captureAssets) {
+      try {
+        await captureReferencedImportAssets(session, traceId);
+      } catch (error) {
+        log("warn", "import.reference_asset.pass.failed", { jobId: session.jobId, tabId: session.tabId, error: String(error) }, traceId);
+      }
+    }
 
     if (session.options.captureScreenshot) {
       try {
